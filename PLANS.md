@@ -10,7 +10,7 @@ Roadmap only. Each milestone has a one-shot prompt in `prompts/`; do not re-run 
 | 3 | Health: backend probes + `slb health` | todo | | Dead backend leaves rotation; `slb health` < 1s with correct exit codes |
 | 4 | Balancers (weighted RR, least-conn, P2C, hashes, SNI hash) + service-wide affinity + pin table | todo | | Deterministic across processes; FTP-style test: control and data ports of one service reach the same backend, also during drain |
 | 5 | HA: `slb ha init`, keepalived template, kernel script, systemd unit | todo | | Rendered config tested; 0600 perms; `vrrp_script` present |
-| 6 | `slb config push`, `slb conns`, PROXY protocol v2 (optional), benchmark vs HAProxy (baseline only) | todo | | Tests green; benchmark report in `docs/` |
+| 6 | `slb config push`, `slb conns`, PROXY protocol v2 (optional), capacity test + baseline vs HAProxy (see `docs/05-performance.md`) | todo | | Tests green; "tested capacity" table and report in `docs/benchmarks/` |
 | 7 | UDP forwarding under the same service/affinity model | todo | | UDP echo/DNS tests green; "mini-protocol" test passes (TCP control announces a UDP port, UDP data reaches the same backend, also during drain) |
 | 8 | Web UI on the control API | todo | | UI/CLI parity; auth + CSRF tested |
 | 9 | Optional, not planned: IPVS backend for wide-range services | idea | | Only if user demand justifies it |

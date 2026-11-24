@@ -7,7 +7,7 @@ High-availability Layer 4 load balancer for small on-prem setups, written in Go.
 ## Why
 Running two nodes with a floating IP in front of a few TCP/UDP services should not need a network engineer. `slb-go` aims for a guided, safe setup: validated config changes, drain-before-maintenance, clear status output.
 
-It is not trying to out-perform HAProxy, Envoy or IPVS. If you need maximum throughput or L7 features, use those.
+It is sized for small-business loads, with measured limits in [docs/05-performance.md](docs/05-performance.md). For line-rate throughput or L7 features, use HAProxy, Envoy or IPVS.
 
 ## How it works
 ```text

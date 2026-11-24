@@ -1,7 +1,7 @@
 # AGENTS.md
 
 ## Project overview
-**SLB**: HA load balancer for small and mid-size on-prem businesses without a network team. Value = easy, safe operations (CLI, later web UI), not raw speed.
+**SLB**: HA load balancer for small and mid-size on-prem businesses without a network team. Value = easy, safe operations (CLI, later web UI). Sized for small-business scale (`docs/05-performance.md`); correctness first.
 - **Language:** Go. One static binary `slb` (CLI + daemon + later embedded UI). Debian 12+.
 - **Data plane:** our own user-space L4 proxy. TCP passthrough (NEVER terminate TLS); UDP later. Behind a `DataPlane` interface.
 - **HA:** Active-Backup pair. `keepalived` owns the VIP and runs `slb health` via `vrrp_script`.
@@ -12,7 +12,7 @@
 Go binary + `keepalived` + the Linux kernel. Nothing else. HAProxy, Envoy, IPVS and Consul are NOT used in the MVP (benchmark or future options only).
 
 ## Docs index (read before related work)
-`docs/00-architecture.md` topology, service model, decisions | `docs/01-net-theory.md` TCP/TLS/VRRP/related flows | `docs/02-linux-io.md` Go net, kernel, systemd | `docs/03-product-scope.md` positioning, protocol checklist | `docs/04-cli-and-ui.md` CLI contract, UI rules | `docs/references.md` sources | `PLANS.md` milestones (prompts are in `prompts/`)
+`docs/00-architecture.md` topology, service model, decisions | `docs/01-net-theory.md` TCP/TLS/VRRP/related flows | `docs/02-linux-io.md` Go net, kernel, systemd | `docs/03-product-scope.md` positioning, protocol checklist | `docs/04-cli-and-ui.md` CLI contract, UI rules | `docs/05-performance.md` sizing, terms, speed-up rules | `docs/references.md` sources | `PLANS.md` milestones (prompts are in `prompts/`)
 
 ## Layout
 `cmd/slb/` | `internal/{proxy,balancer,state,control,health,ha,cli,ui}` | `scripts/` | `config/` | `docs/` | `prompts/`

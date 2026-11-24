@@ -14,6 +14,12 @@ Two layers. **The control plane (CLI, web UI, config validation, HA rendering) i
         DataPlane interface  --->  (see "Data plane options")
 ```
 
+## Terms
+- **SLB node:** one of exactly two machines running `slb` + `keepalived` (MASTER carries traffic, BACKUP waits).
+- **Backend:** a real server behind the SLB (PC, VM, container). Any number per service; never assumed.
+- **Proxied connection:** one client connection plus the backend connection opened for it (2 TCP legs). Per client connection, not per backend.
+- **Service:** listeners + backend pool + affinity (see below).
+
 ## Topology
 Active-Backup pair on an L2 segment (on-prem / bare metal / VLAN). The VIP is owned by the MASTER only; the BACKUP receives no client traffic until failover.
 

@@ -35,7 +35,7 @@ Short invariants. Verify against `man 7 tcp`, `man 7 socket`, `man 2 splice`, `m
 Ephemeral port math: roughly 28k ports by default per (source IP, destination IP, destination port) tuple. One backend under high connection churn can exhaust it. Mitigations: wider range, more backend IP/port pairs, more SLB source IPs.
 
 ## File descriptors
-- Each proxied TCP connection uses 2 file descriptors. Go (1.19+) raises the soft `RLIMIT_NOFILE` to the hard limit at startup, but still set `LimitNOFILE` in the unit well above `2 x max connections` and enforce a configured max-connections limit.
+- Each proxied client connection uses 2 file descriptors (client leg + backend leg), however many backends exist. Go (1.19+) raises the soft `RLIMIT_NOFILE` to the hard limit at startup, but still set `LimitNOFILE` in the unit well above `2 x max connections` and enforce a configured max-connections limit.
 - Report fd usage in `slb status`.
 
 ## Control socket
