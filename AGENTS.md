@@ -29,6 +29,7 @@ Go binary + `keepalived` + the Linux kernel. Nothing else. HAProxy, Envoy, IPVS 
 New balancer, CLI command, UI action, or health check ships with tests. Integration tests use dummy TLS/UDP backends on localhost (no root, no real VIP). Bug fixes start with a failing test.
 
 ## Code rules
+- Platform: deploy on Linux (Debian 12+). macOS is dev-and-tests only. Linux-specific code (syscalls, socket options, sysctl) goes behind `//go:build linux` with a portable fallback; `go build ./...` and `go test ./...` must keep working on macOS. Linux results are what count.
 - Idiomatic Go; wrap errors with `%w`; no panics in the data path; no global mutable state.
 - `internal/proxy`: standard library only. Allowed third-party: `cobra`. Anything else: ask first.
 - Every goroutine has an owner and a `context.Context`; no leaks (tests check).
@@ -49,6 +50,7 @@ New balancer, CLI command, UI action, or health check ships with tests. Integrat
 ## HA, kernel, config
 - `net.ipv4.ip_nonlocal_bind=1` via `/etc/sysctl.d/99-slb.conf`. `slb ha init` renders unicast VRRP with a `vrrp_script` running `slb health` (`interval`, `fall`, `rise`); output mode `0600`.
 - systemd: non-root user, `AmbientCapabilities=CAP_NET_BIND_SERVICE`, `LimitNOFILE`, `RuntimeDirectory=slb`.
+- Everything must run without root in dev. Control socket path: `--socket` > `SLB_SOCKET` > config `control.socket` > default (docs/02-linux-io.md).
 - Never hardcode VIPs, interfaces, secrets or backend IPs: `/etc/slb/config.json` + env overrides. Validate before applying a reload; on failure keep last-known-good.
 
 ## Boundaries

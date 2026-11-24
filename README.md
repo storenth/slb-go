@@ -30,15 +30,18 @@ Details: [docs/00-architecture.md](docs/00-architecture.md).
 ## Requirements
 - Go (see `go.mod` for the minimum version)
 - Debian 12+ for deployment, with `keepalived`
-- Linux for running (the proxy uses Linux-specific socket features)
+- Supported platform: Linux (Debian 12+ is the tested target). macOS: development and tests only. BSD: not planned (it would need CARP instead of VRRP/keepalived, a separate HA path).
 
 ## Quick start (development)
 ```bash
 go build -o bin/slb ./cmd/slb
 ./scripts/gen_certs.sh                 # test certificates for dummy backends
-./bin/slb run --config config/dev.json
-./bin/slb status
+./bin/slb run --config config/dev.json # control socket from config/dev.json
+./bin/slb status                       # reads the same config for the socket path
 ```
+
+> **Linux is required for deployment; macOS works for development (no splice, no keepalived).**
+
 Run the tests: `go test -race ./...`
 
 Commands may change while the project is in early development.

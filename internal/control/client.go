@@ -6,16 +6,43 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strconv"
+
+	"github.com/storenth/slb-go/internal/state"
 )
 
 type Status struct {
-	Backends          []proxyBackend `json:"backends"`
-	ActiveConnections int64          `json:"active_connections"`
-	TotalConnections  uint64         `json:"total_connections"`
-	UptimeSeconds     float64        `json:"uptime_seconds"`
+	Services      []Service `json:"services"`
+	UptimeSeconds float64   `json:"uptime_seconds"`
 }
 
-type proxyBackend struct {
+type Service struct {
+	Name              string     `json:"name"`
+	Listeners         []Listener `json:"listeners"`
+	Backends          []Backend  `json:"backends"`
+	ActiveConnections int64      `json:"active_connections"`
+	TotalConnections  uint64     `json:"total_connections"`
+}
+
+type Listener struct {
+	Address           string           `json:"address"`
+	Protocol          string           `json:"protocol"`
+	Port              int              `json:"port,omitempty"`
+	PortRange         *state.PortRange `json:"port_range,omitempty"`
+	ActiveConnections int64            `json:"active_connections"`
+	TotalConnections  uint64           `json:"total_connections"`
+}
+
+// AddressPort returns the listener address with its port or port range,
+// e.g. "127.0.0.1:8443" or "127.0.0.1:30000-30100".
+func (l Listener) AddressPort() string {
+	if l.PortRange != nil {
+		return net.JoinHostPort(l.Address, fmt.Sprintf("%d-%d", l.PortRange.Start, l.PortRange.End))
+	}
+	return net.JoinHostPort(l.Address, strconv.Itoa(l.Port))
+}
+
+type Backend struct {
 	Host              string `json:"host"`
 	Port              int    `json:"port"`
 	ActiveConnections int64  `json:"active_connections"`

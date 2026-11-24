@@ -1,8 +1,17 @@
 {
-  "listen": {"address": "127.0.0.1", "port": 8443},
-  "backends": [
-    {"host": "127.0.0.1", "port": 9443},
-    {"host": "127.0.0.1", "port": 9444}
+  "services": [
+    {
+      "name": "web",
+      "listeners": [
+        {"address": "127.0.0.1", "protocol": "tcp", "port": 8443}
+      ],
+      "backends": [
+        {"host": "127.0.0.1", "port": 9443},
+        {"host": "127.0.0.1", "port": 9444}
+      ],
+      "affinity": "none"
+    }
   ],
-  "timeouts": {"dial": "5s", "idle": "5m"}
+  "timeouts": {"dial": "5s", "idle": "5m"},
+  "control": {"socket": "/tmp/slb-dev.sock"}
 }

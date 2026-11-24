@@ -2,6 +2,12 @@
 
 Short invariants. Verify against `man 7 tcp`, `man 7 socket`, `man 2 splice`, `man 5 systemd.exec`, and the Go `net` package docs before changing related code.
 
+## Platforms
+- Production: Linux (Debian 12+): `keepalived`/VRRP, `systemd`, `ip_nonlocal_bind`, `splice`.
+- macOS: development and unit/integration tests only (no `splice`, no VRRP). Any Linux-only code lives behind `//go:build linux` with a portable fallback.
+- BSD and other Unix-likes: not supported (different HA stack, sysctls and init system).
+- Production paths such as `/run/slb/slb.sock` stay as they are (systemd `RuntimeDirectory=slb`); dev overrides them with `--socket`.
+
 ## Go networking model
 - Go's `net` is blocking-style code on top of the runtime's epoll poller: one goroutine per connection is the normal, cheap design. No manual event loop, no callbacks. Backpressure is natural: a blocked `Write` slows the reader.
 - **Zero-copy:** `io.Copy` between two `*net.TCPConn` values uses `splice(2)` on Linux, so bytes need not enter user space. Wrapping a conn in your own `io.Reader`/`io.Writer` (counting, rate-limit, logging) disables this. Count bytes from `io.Copy`'s return value instead. Confirm with the milestone-6 benchmark. (From Go's documented `ReaderFrom` behaviour; verify for the Go version in use.)
@@ -39,6 +45,8 @@ Ephemeral port math: roughly 28k ports by default per (source IP, destination IP
 - Report fd usage in `slb status`.
 
 ## Control socket
+- **Path resolution (first match wins):** `--socket` flag, env `SLB_SOCKET`, config `control.socket`, default. Default: `/run/slb/slb.sock` if root or `/run/slb` exists and is writable (systemd), else `$XDG_RUNTIME_DIR/slb/slb.sock`, else `<tmp>/slb-<uid>/slb.sock`. Dev config uses a short path like `/tmp/slb-dev.sock` (macOS limits Unix socket paths to about 104 bytes).
+- Never hardcode `/run` as the only option: macOS has no writable `/run`, and dev runs are non-root.
 - `/run/slb/slb.sock`, directory from systemd (`RuntimeDirectory=slb`), mode `0660`, group-restricted. Remove a stale socket on start.
 - HTTP+JSON via stdlib `net/http` over the Unix socket. Request size caps, read/write timeouts. The same handlers can later be exposed (authenticated) for the UI.
 

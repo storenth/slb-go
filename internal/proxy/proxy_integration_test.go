@@ -18,9 +18,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/storenth/ecmp-load-balancer/internal/balancer"
-	"github.com/storenth/ecmp-load-balancer/internal/proxy"
-	"github.com/storenth/ecmp-load-balancer/internal/state"
+	"github.com/storenth/slb-go/internal/balancer"
+	"github.com/storenth/slb-go/internal/proxy"
+	"github.com/storenth/slb-go/internal/state"
 )
 
 type tlsBackend struct {
@@ -88,7 +88,8 @@ func certificate(t *testing.T) (tls.Certificate, *x509.Certificate) {
 func startProxy(t *testing.T, backends []state.Backend) (*proxy.Proxy, context.CancelFunc, <-chan error) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	p := proxy.New("127.0.0.1:0", backends, balancer.NewRoundRobin(backends), time.Second, 10*time.Second)
+	service := state.Service{Name: "test", Listeners: []state.Listener{{Address: "127.0.0.1", Protocol: "tcp", Port: 0}}, Backends: backends, Affinity: "none"}
+	p := proxy.New(service, balancer.NewRoundRobin(backends), time.Second, 10*time.Second)
 	done := make(chan error, 1)
 	go func() { done <- p.Run(ctx) }()
 	deadline := time.Now().Add(2 * time.Second)

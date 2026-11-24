@@ -1,4 +1,4 @@
-module github.com/storenth/ecmp-load-balancer
+module github.com/storenth/slb-go
 
 go 1.24
 

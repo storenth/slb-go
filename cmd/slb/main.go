@@ -4,7 +4,7 @@ import (
 	"context"
 	"os"
 
-	"github.com/storenth/ecmp-load-balancer/internal/cli"
+	"github.com/storenth/slb-go/internal/cli"
 )
 
 func main() {

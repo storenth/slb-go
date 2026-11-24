@@ -5,14 +5,14 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/storenth/ecmp-load-balancer/internal/state"
+	"github.com/storenth/slb-go/internal/state"
 )
 
 func TestRoundRobin(t *testing.T) {
 	backends := []state.Backend{{Host: "one", Port: 1}, {Host: "two", Port: 2}}
 	roundRobin := NewRoundRobin(backends)
 	for i, want := range []state.Backend{backends[0], backends[1], backends[0], backends[1]} {
-		got, err := roundRobin.Next()
+		got, err := roundRobin.Next(Request{})
 		if err != nil {
 			t.Fatalf("Next %d: %v", i, err)
 		}
@@ -23,7 +23,7 @@ func TestRoundRobin(t *testing.T) {
 }
 
 func TestRoundRobinNoBackends(t *testing.T) {
-	_, err := NewRoundRobin(nil).Next()
+	_, err := NewRoundRobin(nil).Next(Request{})
 	if !errors.Is(err, ErrNoBackends) {
 		t.Fatalf("error = %v, want ErrNoBackends", err)
 	}
@@ -38,7 +38,7 @@ func TestRoundRobinConcurrent(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			backend, err := roundRobin.Next()
+			backend, err := roundRobin.Next(Request{})
 			if err != nil {
 				t.Error(err)
 				return

@@ -7,7 +7,7 @@ Read AGENTS.md and docs/00-architecture.md first.
 
 Goal: Milestone 1 only. Do not implement anything from later milestones.
 
-Build (Go, module path: github.com/OWNER/slb, replace OWNER later):
+Build (Go, module path: github.com/storenth/slb-go):
 1. Skeleton: go.mod, cmd/slb/main.go, internal/{proxy,balancer,state,control,cli}, config/dev.json, scripts/gen_certs.sh. CLI via cobra.
 2. StateProvider interface + FileStateProvider: load JSON with `services[]`, each having `listeners[]` (protocol, port; port ranges may be parsed but only a single TCP listener per service must work in this milestone), `backends[]` (host/port) and an `affinity` field (parsed and validated, only `none` implemented now). Validate with clear errors. The config shape must not need to change for milestone 4.
 3. Balancer interface + RoundRobin implementation.
