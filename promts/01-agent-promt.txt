@@ -1,0 +1,4 @@
+Where it can make sense" How about that idea: end users creates home servers or clusters (AI/K8S/etc) and serves services behind the router and our SLB come into place? but you can imagine more specific and more profitable cases for my LB/SLB product!
+
+ANSWER:
+Small and mid-size on-prem businesses wanting HA without a network team. They have two servers and a few TCP services (RDP, SMTP, databases, legacy apps). The sellable value is operations: CLI plus a simple UI, drain-and-upgrade workflows, config sync, clear status. Money would come from support, install, or a managed offering, not licenses.
