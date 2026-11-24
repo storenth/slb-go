@@ -29,6 +29,19 @@ Short invariants for agents and humans. Each rule has a source. Verify against t
 - Removing an unhealthy backend must not reshuffle healthy backends' clients under consistent hashing.
 
 ## Health checking
+- **Failure handling strategy.** Industry tools differ; ours is a conservative blend (numbers below are our synthesis, tune with tests).
+  - HAProxy: `retries` default 3, retry on the same server unless `option redispatch`; `timeout connect` commonly 3-5 s; active checks `fall 3` / `rise 2`.
+  - nginx `stream`: next-upstream on by default, tries unbounded (limited by server count); `max_fails=1` within `fail_timeout=10s` takes a server out for 10 s; a single-server group is never marked down; connect timeout default 60 s (too long for us).
+  - Envoy outlier detection: 5 consecutive failures (connection failures count for TCP), ejected 30 s times the number of ejections (cap 300 s), at most 10% of hosts ejected but always allowing at least one.
+- **Our defaults:**
+  1. **Connect timeout 3 s** (`dial.timeout`). A refused connection fails instantly; an unreachable host costs the full timeout.
+  2. **Retry on a DIFFERENT backend, up to 3 attempts** (`dial.max_attempts`, capped by the number of eligible backends), within a total **dial budget of 5 s**. No repeated attempts on the same backend inside one client connection.
+  3. **Retry only connect-phase failures** (refused, timeout, unreachable). Never retry after any byte has been forwarded to a backend; replay peeked ClientHello bytes.
+  4. **Passive ejection:** after **3 consecutive** dial failures, eject for **30 s**, growing by 30 s per consecutive ejection up to **5 min**. A successful dial resets the count.
+  5. **Never eject the last backend.** If all are ejected, try them anyway (fail-open), soonest-to-expire first.
+  6. **Active probes (milestone 3):** interval 2 s, `fall 3`, `rise 2`; probes decide re-admission.
+  7. **Deterministic fallback order:** with hashing/affinity, the next backend comes from the ranked hash list (rendezvous hashing), so both HA nodes agree. A pinned backend that fails is replaced by the next candidate and the pin is updated.
+  8. Worst-case detection for a dead backend: first clients see one extra attempt (instant if refused, up to 3 s if black-holed); after about 3 failures it is skipped entirely.
 - Backend probe (TCP connect, optional TLS handshake without verifying app data) is separate from the local `slb health`.
 - Use hysteresis (N failures to mark down, M successes to mark up) to prevent flapping.
 - Probes run on BOTH nodes so BACKUP has a current view at failover.

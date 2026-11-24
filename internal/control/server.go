@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -18,6 +19,8 @@ type StatsProvider interface{ Stats() proxy.Stats }
 type Server struct {
 	Path  string
 	Stats StatsProvider
+	// Logger is used for control-plane log lines. If nil, slog.Default() is used.
+	Logger *slog.Logger
 }
 
 type statusResponse struct {
@@ -26,6 +29,10 @@ type statusResponse struct {
 }
 
 func (s Server) Run(ctx context.Context) error {
+	logger := s.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
 	if err := PrepareSocketDir(s.Path); err != nil {
 		return err
 	}
@@ -40,6 +47,7 @@ func (s Server) Run(ctx context.Context) error {
 	if err := os.Chmod(s.Path, SocketFileMode(s.Path)); err != nil {
 		return fmt.Errorf("set control socket permissions: %w", err)
 	}
+	logger.Info("control socket listening", "path", s.Path)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/status", s.handleStatus)
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
@@ -47,6 +55,7 @@ func (s Server) Run(ctx context.Context) error {
 	go func() {
 		select {
 		case <-ctx.Done():
+			logger.Info("shutting down control socket")
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			_ = server.Shutdown(shutdownCtx)

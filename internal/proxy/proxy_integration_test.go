@@ -1,6 +1,7 @@
 package proxy_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -10,6 +11,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/big"
 	"net"
 	"runtime"
@@ -172,5 +174,107 @@ func TestHalfCloseAndShutdownDoesNotLeak(t *testing.T) {
 	}
 	if got := runtime.NumGoroutine(); got > before+2 {
 		t.Fatalf("goroutines after shutdown = %d, before = %d", got, before)
+	}
+}
+
+func TestFailedCounterIncrementsOnDialFailure(t *testing.T) {
+	// Backend points at a port where nothing is listening, so every dial fails.
+	deadBackend := state.Backend{Host: "127.0.0.1", Port: 1} // port 1: nothing listens
+	service := state.Service{
+		Name:      "dead",
+		Listeners: []state.Listener{{Address: "127.0.0.1", Protocol: "tcp", Port: 0}},
+		Backends:  []state.Backend{deadBackend},
+		Affinity:  "none",
+	}
+	p := proxy.New(service, balancer.NewRoundRobin([]state.Backend{deadBackend}), 100*time.Millisecond, 10*time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- p.Run(ctx) }()
+	// Wait for the proxy to start listening.
+	deadline := time.Now().Add(2 * time.Second)
+	for strings.HasSuffix(p.Address(), ":0") && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if strings.HasSuffix(p.Address(), ":0") {
+		cancel()
+		t.Fatal("proxy did not start")
+	}
+
+	// Make several client connections; each should fail to dial the backend.
+	for range 5 {
+		conn, err := net.Dial("tcp", p.Address())
+		if err != nil {
+			t.Fatalf("dial proxy: %v", err)
+		}
+		// Give the proxy time to attempt the backend dial and close.
+		time.Sleep(200 * time.Millisecond)
+		_ = conn.Close()
+	}
+
+	// Allow dials to time out and settle.
+	time.Sleep(300 * time.Millisecond)
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+
+	stats := p.Stats()
+	if len(stats.Services) != 1 || len(stats.Services[0].Backends) != 1 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+	failed := stats.Services[0].Backends[0].FailedConnections
+	if failed == 0 {
+		t.Fatalf("expected failed counter > 0, got %d", failed)
+	}
+}
+
+func TestDialFailureLoggingRateLimited(t *testing.T) {
+	// Use a logger that writes to a buffer so we can inspect the output.
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	deadBackend := state.Backend{Host: "127.0.0.1", Port: 1}
+	service := state.Service{
+		Name:      "dead",
+		Listeners: []state.Listener{{Address: "127.0.0.1", Protocol: "tcp", Port: 0}},
+		Backends:  []state.Backend{deadBackend},
+		Affinity:  "none",
+	}
+	p := proxy.NewWithLogger(service, balancer.NewRoundRobin([]state.Backend{deadBackend}), 100*time.Millisecond, 10*time.Second, logger)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- p.Run(ctx) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for strings.HasSuffix(p.Address(), ":0") && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if strings.HasSuffix(p.Address(), ":0") {
+		cancel()
+		t.Fatal("proxy did not start")
+	}
+
+	// Make several client connections rapidly; all should fail to dial.
+	// The rate limiter should allow only one warn line for the backend.
+	for range 5 {
+		conn, err := net.Dial("tcp", p.Address())
+		if err != nil {
+			t.Fatalf("dial proxy: %v", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+		_ = conn.Close()
+	}
+
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+
+	output := buf.String()
+	// Count the number of "backend dial failed" lines.
+	count := strings.Count(output, "backend dial failed")
+	if count != 1 {
+		t.Fatalf("expected exactly 1 dial-failure log line (rate limited), got %d:\n%s", count, output)
 	}
 }

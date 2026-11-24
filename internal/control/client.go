@@ -47,6 +47,7 @@ type Backend struct {
 	Port              int    `json:"port"`
 	ActiveConnections int64  `json:"active_connections"`
 	TotalConnections  uint64 `json:"total_connections"`
+	FailedConnections uint64 `json:"failed_connections"`
 }
 
 func GetStatus(ctx context.Context, socketPath string) (Status, error) {

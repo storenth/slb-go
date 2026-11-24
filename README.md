@@ -36,8 +36,8 @@ Details: [docs/00-architecture.md](docs/00-architecture.md).
 ```bash
 go build -o bin/slb ./cmd/slb
 ./scripts/gen_certs.sh                 # test certificates for dummy backends
-./bin/slb run --config config/dev.json # control socket from config/dev.json
-./bin/slb status                       # reads the same config for the socket path
+./bin/slb run --config config/dev.json # control socket uses the default dev path
+./bin/slb status                       # resolves the same default socket path
 ```
 
 > **Linux is required for deployment; macOS works for development (no splice, no keepalived).**

@@ -21,6 +21,16 @@ type SocketOptions struct {
 	Config string
 }
 
+// SocketSource identifies where a resolved socket path came from.
+type SocketSource string
+
+const (
+	SocketSourceFlag    SocketSource = "flag"
+	SocketSourceEnv     SocketSource = "env"
+	SocketSourceConfig  SocketSource = "config"
+	SocketSourceDefault SocketSource = "default"
+)
+
 // DefaultSocketPath is the system-level default used under systemd (root or
 // pre-existing /run/slb). It is exported so callers can use it as a flag default.
 const DefaultSocketPath = "/run/slb/slb.sock"
@@ -29,12 +39,23 @@ const DefaultSocketPath = "/run/slb/slb.sock"
 // precedence: --socket flag, SLB_SOCKET env, config control.socket, built-in
 // default.
 func ResolveSocketPath(opts SocketOptions) string {
-	for _, candidate := range []string{opts.Flag, opts.Env, opts.Config} {
-		if candidate != "" {
-			return candidate
-		}
+	path, _ := ResolveSocketPathWithSource(opts)
+	return path
+}
+
+// ResolveSocketPathWithSource is like ResolveSocketPath but also returns the
+// source of the resolved path (flag, env, config, or default).
+func ResolveSocketPathWithSource(opts SocketOptions) (string, SocketSource) {
+	if opts.Flag != "" {
+		return opts.Flag, SocketSourceFlag
 	}
-	return defaultSocketPath()
+	if opts.Env != "" {
+		return opts.Env, SocketSourceEnv
+	}
+	if opts.Config != "" {
+		return opts.Config, SocketSourceConfig
+	}
+	return defaultSocketPath(), SocketSourceDefault
 }
 
 // defaultSocketPath returns the built-in default:

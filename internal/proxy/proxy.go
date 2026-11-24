@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -43,6 +44,7 @@ type BackendStats struct {
 	Port              int    `json:"port"`
 	ActiveConnections int64  `json:"active_connections"`
 	TotalConnections  uint64 `json:"total_connections"`
+	FailedConnections uint64 `json:"failed_connections"`
 	BytesFromClients  uint64 `json:"bytes_from_clients"`
 	BytesFromBackend  uint64 `json:"bytes_from_backend"`
 }
@@ -50,34 +52,95 @@ type BackendStats struct {
 type backendCounter struct {
 	active           atomic.Int64
 	total            atomic.Uint64
+	failed           atomic.Uint64
 	bytesFromClients atomic.Uint64
 	bytesFromBackend atomic.Uint64
 }
 
+// dialFailureRateLimiter limits dial-failure log lines to at most one per
+// backend per window (10 seconds). Suppressed repeats are counted and included
+// in the next emitted line.
+type dialFailureRateLimiter struct {
+	mu      sync.Mutex
+	window  time.Duration
+	now     func() time.Time
+	entries map[string]*rateLimitEntry
+}
+
+type rateLimitEntry struct {
+	lastLogged time.Time
+	suppressed atomic.Uint64
+}
+
+func newDialFailureRateLimiter(window time.Duration) *dialFailureRateLimiter {
+	return &dialFailureRateLimiter{window: window, now: time.Now, entries: make(map[string]*rateLimitEntry)}
+}
+
+// shouldLog reports whether a dial-failure log line should be emitted now for
+// the given backend key. If false, the suppressed count is incremented.
+func (r *dialFailureRateLimiter) shouldLog(key string) (suppressed uint64, emit bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	entry, ok := r.entries[key]
+	if !ok {
+		entry = &rateLimitEntry{}
+		r.entries[key] = entry
+	}
+	now := r.now()
+	if entry.lastLogged.IsZero() || now.Sub(entry.lastLogged) >= r.window {
+		suppressed := entry.suppressed.Swap(0)
+		entry.lastLogged = now
+		return suppressed, true
+	}
+	entry.suppressed.Add(1)
+	return 0, false
+}
+
 type Proxy struct {
-	service     state.Service
-	address     string
-	balancer    balancer.Balancer
-	dialTimeout time.Duration
-	idleTimeout time.Duration
-	started     time.Time
-	total       atomic.Uint64
-	active      atomic.Int64
-	fromClients atomic.Uint64
-	fromBackend atomic.Uint64
-	counters    []backendCounter
-	mu          sync.Mutex
-	listener    *net.TCPListener
-	connections map[*net.TCPConn]struct{}
-	wg          sync.WaitGroup
+	service      state.Service
+	address      string
+	balancer     balancer.Balancer
+	dialTimeout  time.Duration
+	idleTimeout  time.Duration
+	logger       *slog.Logger
+	dialFailures *dialFailureRateLimiter
+	started      time.Time
+	total        atomic.Uint64
+	active       atomic.Int64
+	fromClients  atomic.Uint64
+	fromBackend  atomic.Uint64
+	counters     []backendCounter
+	mu           sync.Mutex
+	listener     *net.TCPListener
+	connections  map[*net.TCPConn]struct{}
+	wg           sync.WaitGroup
 }
 
 func New(service state.Service, b balancer.Balancer, dialTimeout, idleTimeout time.Duration) *Proxy {
+	return NewWithLogger(service, b, dialTimeout, idleTimeout, slog.Default())
+}
+
+// NewWithLogger creates a Proxy that logs dial failures (warn, rate-limited)
+// and per-connection events (debug) through the given logger.
+func NewWithLogger(service state.Service, b balancer.Balancer, dialTimeout, idleTimeout time.Duration, logger *slog.Logger) *Proxy {
 	address := ""
 	if len(service.Listeners) != 0 {
 		address = service.Listeners[0].AddressPort()
 	}
-	return &Proxy{service: service, address: address, balancer: b, dialTimeout: dialTimeout, idleTimeout: idleTimeout, counters: make([]backendCounter, len(service.Backends)), connections: make(map[*net.TCPConn]struct{})}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Proxy{
+		service:      service,
+		address:      address,
+		balancer:     b,
+		dialTimeout:  dialTimeout,
+		idleTimeout:  idleTimeout,
+		logger:       logger,
+		dialFailures: newDialFailureRateLimiter(10 * time.Second),
+		counters:     make([]backendCounter, len(service.Backends)),
+		connections:  make(map[*net.TCPConn]struct{}),
+	}
 }
 
 func (p *Proxy) Address() string {
@@ -90,6 +153,10 @@ func (p *Proxy) Address() string {
 }
 
 func (p *Proxy) Run(ctx context.Context) error {
+	return p.runWithLogger(ctx, p.logger)
+}
+
+func (p *Proxy) runWithLogger(ctx context.Context, logger *slog.Logger) error {
 	addr, err := net.ResolveTCPAddr("tcp", p.address)
 	if err != nil {
 		return fmt.Errorf("resolve listen address for service %q: %w", p.service.Name, err)
@@ -102,10 +169,12 @@ func (p *Proxy) Run(ctx context.Context) error {
 	p.listener = listener
 	p.started = time.Now()
 	p.mu.Unlock()
+	logger.Info("listening", "service", p.service.Name, "address", listener.Addr().String())
 	stop := make(chan struct{})
 	go func() {
 		select {
 		case <-ctx.Done():
+			logger.Info("shutdown signal received", "service", p.service.Name)
 			_ = listener.Close()
 			p.closeConnections()
 		case <-stop:
@@ -130,6 +199,7 @@ func (p *Proxy) handle(ctx context.Context, client *net.TCPConn) {
 	defer p.wg.Done()
 	defer p.track(client, false)
 	defer func() { _ = client.Close() }()
+	startTime := time.Now()
 	backend, err := p.balancer.Next(balancer.Request{Service: p.service, ClientAddress: client.RemoteAddr()})
 	if err != nil {
 		return
@@ -138,6 +208,10 @@ func (p *Proxy) handle(ctx context.Context, client *net.TCPConn) {
 	dialer := net.Dialer{Timeout: p.dialTimeout, KeepAlive: p.idleTimeout}
 	conn, err := dialer.DialContext(ctx, "tcp", backend.Address())
 	if err != nil {
+		if index >= 0 {
+			p.counters[index].failed.Add(1)
+		}
+		p.logDialFailure(backend, err)
 		return
 	}
 	server, ok := conn.(*net.TCPConn)
@@ -161,22 +235,56 @@ func (p *Proxy) handle(ctx context.Context, client *net.TCPConn) {
 		p.counters[index].active.Add(1)
 		defer p.counters[index].active.Add(-1)
 	}
+	p.logger.Debug("connection accepted",
+		"service", p.service.Name,
+		"client", client.RemoteAddr().String(),
+		"backend", backend.Address(),
+	)
 
 	var copies sync.WaitGroup
+	var clientBytes, backendBytes uint64
 	copies.Add(2)
 	go func() {
 		defer copies.Done()
 		count, _ := io.Copy(server, client)
-		p.recordClientBytes(index, uint64(count))
+		clientBytes = uint64(count)
+		p.recordClientBytes(index, clientBytes)
 		_ = server.CloseWrite()
 	}()
 	go func() {
 		defer copies.Done()
 		count, _ := io.Copy(client, server)
-		p.recordBackendBytes(index, uint64(count))
+		backendBytes = uint64(count)
+		p.recordBackendBytes(index, backendBytes)
 		_ = client.CloseWrite()
 	}()
 	copies.Wait()
+	p.logger.Debug("connection closed",
+		"service", p.service.Name,
+		"client", client.RemoteAddr().String(),
+		"backend", backend.Address(),
+		"duration_ms", time.Since(startTime).Milliseconds(),
+		"bytes_in", clientBytes,
+		"bytes_out", backendBytes,
+	)
+}
+
+// logDialFailure emits a rate-limited warn log for a backend dial failure.
+func (p *Proxy) logDialFailure(backend state.Backend, err error) {
+	key := backend.Address()
+	suppressed, emit := p.dialFailures.shouldLog(key)
+	if !emit {
+		return
+	}
+	attrs := []any{
+		"service", p.service.Name,
+		"backend", backend.Address(),
+		"error", err.Error(),
+	}
+	if suppressed > 0 {
+		attrs = append(attrs, "suppressed", suppressed)
+	}
+	p.logger.Warn("backend dial failed", attrs...)
 }
 
 func (p *Proxy) configureIdleDetection(conn *net.TCPConn) {
@@ -242,7 +350,7 @@ func (p *Proxy) Stats() Stats {
 	}
 	service.Backends = make([]BackendStats, len(p.service.Backends))
 	for i, backend := range p.service.Backends {
-		service.Backends[i] = BackendStats{Host: backend.Host, Port: backend.Port, ActiveConnections: p.counters[i].active.Load(), TotalConnections: p.counters[i].total.Load(), BytesFromClients: p.counters[i].bytesFromClients.Load(), BytesFromBackend: p.counters[i].bytesFromBackend.Load()}
+		service.Backends[i] = BackendStats{Host: backend.Host, Port: backend.Port, ActiveConnections: p.counters[i].active.Load(), TotalConnections: p.counters[i].total.Load(), FailedConnections: p.counters[i].failed.Load(), BytesFromClients: p.counters[i].bytesFromClients.Load(), BytesFromBackend: p.counters[i].bytesFromBackend.Load()}
 	}
 	result := Stats{Services: []ServiceStats{service}}
 	p.mu.Lock()
@@ -258,10 +366,13 @@ type Collection struct {
 	Started time.Time
 }
 
-func (c Collection) Run(ctx context.Context) error {
+func (c Collection) Run(ctx context.Context, logger *slog.Logger) error {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	errs := make(chan error, len(c.Proxies))
 	for _, p := range c.Proxies {
-		go func(p *Proxy) { errs <- p.Run(ctx) }(p)
+		go func(p *Proxy) { errs <- p.runWithLogger(ctx, logger) }(p)
 	}
 	return <-errs
 }

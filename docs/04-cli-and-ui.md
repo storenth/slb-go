@@ -22,3 +22,9 @@ slb conns [--backend X]       # live connections, pins
 - Safe by default: bind to localhost or the management interface, authentication required, CSRF protection, audit log, no secrets in responses.
 - Every change: validate, preview diff, apply, auto-rollback if health fails.
 - Ask before adding any frontend framework.
+
+## Status counters (definitions)
+- Listener `total`: client connections accepted. `active`: connections currently being proxied.
+- Backend `total`: connection attempts routed to this backend, INCLUDING failed ones. `failed`: attempts that could not connect (a subset of `total`). Established connections = `total` - `failed`.
+- With dial retry (milestone 1f), a client connection that fails on one backend and succeeds on another counts as one failed attempt on the first and one attempt on the second; the listener counts the client connection once.
+- Invariant used in tests: sum of backend `total` >= listener `total`, with equality when no retries happen.

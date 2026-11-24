@@ -33,7 +33,8 @@ New balancer, CLI command, UI action, or health check ships with tests. Integrat
 - Idiomatic Go; wrap errors with `%w`; no panics in the data path; no global mutable state.
 - `internal/proxy`: standard library only. Allowed third-party: `cobra`. Anything else: ask first.
 - Every goroutine has an owner and a `context.Context`; no leaks (tests check).
-- Logging with `log/slog` (JSON); never log secrets. Bash: `#!/usr/bin/env bash` + `set -euo pipefail`.
+- Daemon logs via `log/slog` to stderr: info = startup/config/shutdown, warn = rate-limited backend errors, debug = per-connection. Text on a terminal, JSON otherwise (`--log-level`, `--log-format`). Never log secrets.
+- CLI commands print `slb: <message>` to stderr with a documented exit code; they do not emit slog lines. Bash: `#!/usr/bin/env bash` + `set -euo pipefail`.
 
 ## Network rules (why: docs/01, docs/02)
 - Close both connections on every exit path; reset, broken pipe and EOF are normal.
@@ -43,6 +44,7 @@ New balancer, CLI command, UI action, or health check ships with tests. Integrat
 - **Service model:** service = listeners (protocol + port or bounded range) + one backend pool + one affinity policy (`none`, `client_ip`, `client_ip+sni`). Affinity scope is the service, never one listener.
 - **Selection order:** (1) local pin for this client IP (also for draining backends), (2) deterministic hash (fixed hash function, no per-process seeds, sorted iteration). Pins are per-node and never required for correctness after failover.
 - `drain` waits up to a configured maximum, then closes. Never rebalance existing connections.
+- Dial failure: retry on a DIFFERENT eligible backend (max 3 attempts, 5 s total budget, connect-phase failures only, never after bytes were forwarded; replay peeked ClientHello bytes). Eject after 3 consecutive failures; never eject the last backend (fail-open). Defaults and rationale: `docs/01-net-theory.md`.
 - Backend probes run on BOTH nodes with hysteresis; `slb health` is separate (local, <1s, exit 0/1).
 - PROXY protocol v2: optional, per backend, off by default.
 - Out of scope for MVP: protocol helpers/ALGs (e.g. FTP PASV rewriting), active-mode FTP, wide port ranges. Never write protocol-specific (FTP etc.) code in the data path; FTP is only an acceptance test.

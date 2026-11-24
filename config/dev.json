@@ -12,6 +12,5 @@
       "affinity": "none"
     }
   ],
-  "timeouts": {"dial": "5s", "idle": "5m"},
-  "control": {"socket": "/tmp/slb-dev.sock"}
+  "timeouts": {"dial": "5s", "idle": "5m"}
 }
