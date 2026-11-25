@@ -14,5 +14,5 @@
       "ejection": {"consecutive_failures": 3, "base_time": "30s", "max_time": "5m"}
     }
   ],
-  "timeouts": {"dial": "5s", "idle": "5m"}
+  "timeouts": {"idle": "5m"}
 }

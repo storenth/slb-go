@@ -13,17 +13,16 @@ import (
 )
 
 const (
-	DefaultDialTimeout  = 5 * time.Second
 	DefaultIdleTimeout  = 5 * time.Minute
 	DefaultPortRangeCap = 256
 
-	// Milestone 1f dial-retry and ejection defaults (docs/01-net-theory.md).
-	DefaultDialTimeoutM1F         = 3 * time.Second
-	DefaultDialMaxAttempts        = 3
-	DefaultDialBudget             = 5 * time.Second
-	DefaultEjectionConsecFailures = 3
-	DefaultEjectionBaseTime       = 30 * time.Second
-	DefaultEjectionMaxTime        = 5 * time.Minute
+	// Dial-retry and ejection defaults (docs/01-net-theory.md).
+	DefaultDialTimeout        = 3 * time.Second
+	DefaultDialMaxAttempts    = 3
+	DefaultDialBudget         = 5 * time.Second
+	DefaultEjectionConsecFail = 3
+	DefaultEjectionBaseTime   = 30 * time.Second
+	DefaultEjectionMaxTime    = 5 * time.Minute
 )
 
 type Backend struct {
@@ -94,7 +93,7 @@ type ResolvedEjectionConfig struct {
 }
 
 func (d DialConfig) Resolve() ResolvedDialConfig {
-	timeout := durationOr(d.Timeout, DefaultDialTimeoutM1F)
+	timeout := durationOr(d.Timeout, DefaultDialTimeout)
 	maxAttempts := d.MaxAttempts
 	if maxAttempts <= 0 {
 		maxAttempts = DefaultDialMaxAttempts
@@ -106,15 +105,16 @@ func (d DialConfig) Resolve() ResolvedDialConfig {
 func (e EjectionConfig) Resolve() ResolvedEjectionConfig {
 	consec := e.ConsecutiveFailures
 	if consec <= 0 {
-		consec = DefaultEjectionConsecFailures
+		consec = DefaultEjectionConsecFail
 	}
 	baseTime := durationOr(e.BaseTime, DefaultEjectionBaseTime)
 	maxTime := durationOr(e.MaxTime, DefaultEjectionMaxTime)
 	return ResolvedEjectionConfig{ConsecutiveFailures: consec, BaseTime: baseTime, MaxTime: maxTime}
 }
 
+// Timeouts holds global timeout settings. Dial timeout is per-service
+// (see Service.Dial); only idle is global.
 type Timeouts struct {
-	Dial string `json:"dial"`
 	Idle string `json:"idle"`
 }
 
@@ -131,7 +131,6 @@ type Config struct {
 	Control          Control   `json:"control,omitempty"`
 }
 
-func (c Config) DialTimeout() time.Duration { return durationOr(c.Timeouts.Dial, DefaultDialTimeout) }
 func (c Config) IdleTimeout() time.Duration { return durationOr(c.Timeouts.Idle, DefaultIdleTimeout) }
 func (c Config) ControlSocket() string      { return c.Control.Socket }
 func (c Config) PortRangeCap() int {
@@ -267,7 +266,7 @@ func (c Config) Validate() error {
 			errs = append(errs, fmt.Errorf("%s.ejection.consecutive_failures must be >= 0 (0 means default)", prefix))
 		}
 	}
-	for name, value := range map[string]string{"timeouts.dial": c.Timeouts.Dial, "timeouts.idle": c.Timeouts.Idle} {
+	for name, value := range map[string]string{"timeouts.idle": c.Timeouts.Idle} {
 		if value == "" {
 			continue
 		}

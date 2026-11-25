@@ -91,7 +91,7 @@ func startProxy(t *testing.T, backends []state.Backend) (*proxy.Proxy, context.C
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	service := state.Service{Name: "test", Listeners: []state.Listener{{Address: "127.0.0.1", Protocol: "tcp", Port: 0}}, Backends: backends, Affinity: "none"}
-	p := proxy.New(service, balancer.NewRoundRobin(backends), time.Second, 10*time.Second)
+	p := proxy.New(service, balancer.NewRoundRobin(backends), 10*time.Second)
 	done := make(chan error, 1)
 	go func() { done <- p.Run(ctx) }()
 	deadline := time.Now().Add(2 * time.Second)
@@ -185,8 +185,9 @@ func TestFailedCounterIncrementsOnDialFailure(t *testing.T) {
 		Listeners: []state.Listener{{Address: "127.0.0.1", Protocol: "tcp", Port: 0}},
 		Backends:  []state.Backend{deadBackend},
 		Affinity:  "none",
+		Dial:      state.DialConfig{Timeout: "100ms", MaxAttempts: 1, Budget: "200ms"},
 	}
-	p := proxy.New(service, balancer.NewRoundRobin([]state.Backend{deadBackend}), 100*time.Millisecond, 10*time.Second)
+	p := proxy.New(service, balancer.NewRoundRobin([]state.Backend{deadBackend}), 10*time.Second)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- p.Run(ctx) }()
@@ -240,8 +241,9 @@ func TestDialFailureLoggingRateLimited(t *testing.T) {
 		Listeners: []state.Listener{{Address: "127.0.0.1", Protocol: "tcp", Port: 0}},
 		Backends:  []state.Backend{deadBackend},
 		Affinity:  "none",
+		Dial:      state.DialConfig{Timeout: "100ms", MaxAttempts: 1, Budget: "200ms"},
 	}
-	p := proxy.NewWithLogger(service, balancer.NewRoundRobin([]state.Backend{deadBackend}), 100*time.Millisecond, 10*time.Second, logger)
+	p := proxy.NewWithLogger(service, balancer.NewRoundRobin([]state.Backend{deadBackend}), 10*time.Second, logger)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- p.Run(ctx) }()

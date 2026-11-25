@@ -158,13 +158,14 @@ type Proxy struct {
 	wg           sync.WaitGroup
 }
 
-func New(service state.Service, b balancer.Balancer, dialTimeout, idleTimeout time.Duration) *Proxy {
-	return NewWithLogger(service, b, dialTimeout, idleTimeout, slog.Default())
+func New(service state.Service, b balancer.Balancer, idleTimeout time.Duration) *Proxy {
+	return NewWithLogger(service, b, idleTimeout, slog.Default())
 }
 
 // NewWithLogger creates a Proxy that logs dial failures (warn, rate-limited)
-// and per-connection events (debug) through the given logger.
-func NewWithLogger(service state.Service, b balancer.Balancer, dialTimeout, idleTimeout time.Duration, logger *slog.Logger) *Proxy {
+// and per-connection events (debug) through the given logger. Dial settings
+// come from service.Dial.Resolve(); idle timeout is global.
+func NewWithLogger(service state.Service, b balancer.Balancer, idleTimeout time.Duration, logger *slog.Logger) *Proxy {
 	address := ""
 	if len(service.Listeners) != 0 {
 		address = service.Listeners[0].AddressPort()
@@ -173,9 +174,6 @@ func NewWithLogger(service state.Service, b balancer.Balancer, dialTimeout, idle
 		logger = slog.Default()
 	}
 	dialCfg := service.Dial.Resolve()
-	if dialTimeout > 0 {
-		dialCfg.Timeout = dialTimeout
-	}
 	em := balancer.NewEjectionManager(service.Backends, service.Ejection.Resolve(), time.Now, logger)
 	return &Proxy{
 		service:      service,

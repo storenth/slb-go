@@ -110,10 +110,9 @@ func newRun(errOut io.Writer) *cobra.Command {
 		defer stop()
 		collection := proxy.Collection{Started: time.Now()}
 		for _, service := range config.Services {
-			dialCfg := service.Dial.Resolve()
 			em := balancer.NewEjectionManager(service.Backends, service.Ejection.Resolve(), time.Now, logger)
 			b := balancer.NewRoundRobinWithEjection(service.Backends, em)
-			p := proxy.NewWithLogger(service, b, dialCfg.Timeout, config.IdleTimeout(), logger)
+			p := proxy.NewWithLogger(service, b, config.IdleTimeout(), logger)
 			collection.Proxies = append(collection.Proxies, p)
 		}
 		controlServer := control.Server{Path: resolved, Stats: collection, Logger: logger}

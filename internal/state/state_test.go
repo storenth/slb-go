@@ -11,7 +11,7 @@ import (
 
 func TestFileStateProvider(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	data := `{"services":[{"name":"web","listeners":[{"address":"127.0.0.1","protocol":"tcp","port":8443}],"backends":[{"host":"127.0.0.1","port":9443}],"affinity":"none"}],"timeouts":{"dial":"2s","idle":"3m"}}`
+	data := `{"services":[{"name":"web","listeners":[{"address":"127.0.0.1","protocol":"tcp","port":8443}],"backends":[{"host":"127.0.0.1","port":9443}],"affinity":"none","dial":{"timeout":"2s"}}],"timeouts":{"idle":"3m"}}`
 	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -19,7 +19,8 @@ func TestFileStateProvider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(config.Services) != 1 || config.Services[0].Name != "web" || config.DialTimeout() != 2*time.Second || config.IdleTimeout() != 3*time.Minute {
+	dialCfg := config.Services[0].Dial.Resolve()
+	if len(config.Services) != 1 || config.Services[0].Name != "web" || dialCfg.Timeout != 2*time.Second || config.IdleTimeout() != 3*time.Minute {
 		t.Fatalf("unexpected config: %+v", config)
 	}
 }
@@ -44,7 +45,7 @@ func TestConfigValidation(t *testing.T) {
 		{"bad affinity", Config{Services: []Service{{Name: "web", Listeners: []Listener{{Address: "127.0.0.1", Protocol: "tcp", Port: 1}}, Backends: []Backend{{Host: "h", Port: 1}}, Affinity: "sticky"}}}, "affinity must be one of"},
 		{"bad protocol", Config{Services: []Service{{Name: "web", Listeners: []Listener{{Address: "127.0.0.1", Protocol: "sctp", Port: 1}}, Backends: []Backend{{Host: "h", Port: 1}}, Affinity: "none"}}}, "protocol must be tcp or udp"},
 		{"backend port", Config{Services: []Service{{Name: "web", Listeners: []Listener{{Address: "127.0.0.1", Protocol: "tcp", Port: 1}}, Backends: []Backend{{Host: "h", Port: 0}}, Affinity: "none"}}}, "backends[0].port"},
-		{"duration", Config{Services: []Service{validService()}, Timeouts: Timeouts{Dial: "soon"}}, "timeouts.dial"},
+		{"duration", Config{Services: []Service{validService()}, Timeouts: Timeouts{Idle: "soon"}}, "timeouts.idle"},
 		{"duplicate backend", Config{Services: []Service{{Name: "web", Listeners: []Listener{{Address: "127.0.0.1", Protocol: "tcp", Port: 1}}, Backends: []Backend{{Host: "h", Port: 1}, {Host: "h", Port: 1}}, Affinity: "none"}}}, "duplicates"},
 	}
 	for _, test := range tests {
@@ -212,8 +213,8 @@ func TestConfigValidationDialEjection(t *testing.T) {
 func TestDialConfigResolveDefaults(t *testing.T) {
 	cfg := DialConfig{}
 	resolved := cfg.Resolve()
-	if resolved.Timeout != DefaultDialTimeoutM1F {
-		t.Fatalf("default timeout = %v, want %v", resolved.Timeout, DefaultDialTimeoutM1F)
+	if resolved.Timeout != DefaultDialTimeout {
+		t.Fatalf("default timeout = %v, want %v", resolved.Timeout, DefaultDialTimeout)
 	}
 	if resolved.MaxAttempts != DefaultDialMaxAttempts {
 		t.Fatalf("default max_attempts = %d, want %d", resolved.MaxAttempts, DefaultDialMaxAttempts)
@@ -226,8 +227,8 @@ func TestDialConfigResolveDefaults(t *testing.T) {
 func TestEjectionConfigResolveDefaults(t *testing.T) {
 	cfg := EjectionConfig{}
 	resolved := cfg.Resolve()
-	if resolved.ConsecutiveFailures != DefaultEjectionConsecFailures {
-		t.Fatalf("default consecutive_failures = %d, want %d", resolved.ConsecutiveFailures, DefaultEjectionConsecFailures)
+	if resolved.ConsecutiveFailures != DefaultEjectionConsecFail {
+		t.Fatalf("default consecutive_failures = %d, want %d", resolved.ConsecutiveFailures, DefaultEjectionConsecFail)
 	}
 	if resolved.BaseTime != DefaultEjectionBaseTime {
 		t.Fatalf("default base_time = %v, want %v", resolved.BaseTime, DefaultEjectionBaseTime)
