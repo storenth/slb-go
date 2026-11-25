@@ -15,6 +15,41 @@ import (
 	"github.com/storenth/slb-go/internal/state"
 )
 
+// Dialer is the interface for dialing backend connections. It is injectable
+// for testing.
+type Dialer interface {
+	DialContext(ctx context.Context, network, address string) (net.Conn, error)
+}
+
+// tcpDialer wraps net.Dialer to implement Dialer.
+type tcpDialer struct {
+	d net.Dialer
+}
+
+func (d *tcpDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	return d.d.DialContext(ctx, network, address)
+}
+
+// isConnectPhaseFailure reports whether err is a connect-phase failure
+// (refused, timeout, unreachable, no route) that warrants a retry on another
+// backend. Errors after bytes were forwarded are never retried.
+func isConnectPhaseFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	// Connection refused, no route, unreachable — all are *net.OpError with
+	// a syscall errno. We treat any dial error as connect-phase since
+	// DialContext only fails during connect.
+	return true
+}
+
 type Stats struct {
 	Services []ServiceStats `json:"services"`
 	Uptime   time.Duration  `json:"-"`
@@ -39,14 +74,19 @@ type ListenerStats struct {
 	TotalConnections  uint64           `json:"total_connections"`
 }
 
+// BackendStats reports per-backend counters and ejection state.
 type BackendStats struct {
-	Host              string `json:"host"`
-	Port              int    `json:"port"`
-	ActiveConnections int64  `json:"active_connections"`
-	TotalConnections  uint64 `json:"total_connections"`
-	FailedConnections uint64 `json:"failed_connections"`
-	BytesFromClients  uint64 `json:"bytes_from_clients"`
-	BytesFromBackend  uint64 `json:"bytes_from_backend"`
+	Host              string     `json:"host"`
+	Port              int        `json:"port"`
+	ActiveConnections int64      `json:"active_connections"`
+	TotalConnections  uint64     `json:"total_connections"`
+	FailedConnections uint64     `json:"failed_connections"`
+	BytesFromClients  uint64     `json:"bytes_from_clients"`
+	BytesFromBackend  uint64     `json:"bytes_from_backend"`
+	State             string     `json:"state"`
+	EjectedUntil      *time.Time `json:"ejected_until,omitempty"`
+	LastError         string     `json:"last_error,omitempty"`
+	LastFailureAt     *time.Time `json:"last_failure_at,omitempty"`
 }
 
 type backendCounter struct {
@@ -100,10 +140,12 @@ type Proxy struct {
 	service      state.Service
 	address      string
 	balancer     balancer.Balancer
-	dialTimeout  time.Duration
+	dialer       Dialer
+	dialCfg      state.ResolvedDialConfig
 	idleTimeout  time.Duration
 	logger       *slog.Logger
 	dialFailures *dialFailureRateLimiter
+	ejection     *balancer.EjectionManager
 	started      time.Time
 	total        atomic.Uint64
 	active       atomic.Int64
@@ -130,18 +172,56 @@ func NewWithLogger(service state.Service, b balancer.Balancer, dialTimeout, idle
 	if logger == nil {
 		logger = slog.Default()
 	}
+	dialCfg := service.Dial.Resolve()
+	if dialTimeout > 0 {
+		dialCfg.Timeout = dialTimeout
+	}
+	em := balancer.NewEjectionManager(service.Backends, service.Ejection.Resolve(), time.Now, logger)
 	return &Proxy{
 		service:      service,
 		address:      address,
 		balancer:     b,
-		dialTimeout:  dialTimeout,
+		dialer:       &tcpDialer{d: net.Dialer{Timeout: dialCfg.Timeout, KeepAlive: idleTimeout}},
+		dialCfg:      dialCfg,
 		idleTimeout:  idleTimeout,
 		logger:       logger,
 		dialFailures: newDialFailureRateLimiter(10 * time.Second),
+		ejection:     em,
 		counters:     make([]backendCounter, len(service.Backends)),
 		connections:  make(map[*net.TCPConn]struct{}),
 	}
 }
+
+// NewWithDialer creates a Proxy with a custom Dialer and EjectionManager,
+// intended for tests that need to inject failures and control the clock.
+func NewWithDialer(service state.Service, b balancer.Balancer, dialer Dialer, dialCfg state.ResolvedDialConfig, idleTimeout time.Duration, em *balancer.EjectionManager, logger *slog.Logger) *Proxy {
+	address := ""
+	if len(service.Listeners) != 0 {
+		address = service.Listeners[0].AddressPort()
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if dialer == nil {
+		dialer = &tcpDialer{d: net.Dialer{Timeout: dialCfg.Timeout, KeepAlive: idleTimeout}}
+	}
+	return &Proxy{
+		service:      service,
+		address:      address,
+		balancer:     b,
+		dialer:       dialer,
+		dialCfg:      dialCfg,
+		idleTimeout:  idleTimeout,
+		logger:       logger,
+		dialFailures: newDialFailureRateLimiter(10 * time.Second),
+		ejection:     em,
+		counters:     make([]backendCounter, len(service.Backends)),
+		connections:  make(map[*net.TCPConn]struct{}),
+	}
+}
+
+// Ejection returns the ejection manager (for status reporting).
+func (p *Proxy) Ejection() *balancer.EjectionManager { return p.ejection }
 
 func (p *Proxy) Address() string {
 	p.mu.Lock()
@@ -200,25 +280,63 @@ func (p *Proxy) handle(ctx context.Context, client *net.TCPConn) {
 	defer p.track(client, false)
 	defer func() { _ = client.Close() }()
 	startTime := time.Now()
-	backend, err := p.balancer.Next(balancer.Request{Service: p.service, ClientAddress: client.RemoteAddr()})
-	if err != nil {
-		return
-	}
-	index := p.backendIndex(backend)
-	dialer := net.Dialer{Timeout: p.dialTimeout, KeepAlive: p.idleTimeout}
-	conn, err := dialer.DialContext(ctx, "tcp", backend.Address())
-	if err != nil {
-		if index >= 0 {
-			p.counters[index].failed.Add(1)
+
+	tried := make(map[int]bool)
+	budgetCtx, budgetCancel := context.WithTimeout(ctx, p.dialCfg.Budget)
+	defer budgetCancel()
+
+	for attempt := 0; attempt < p.dialCfg.MaxAttempts; attempt++ {
+		if budgetCtx.Err() != nil {
+			break
 		}
-		p.logDialFailure(backend, err)
+		idx, backend, err := p.balancer.Next(balancer.Request{
+			Service:       p.service,
+			ClientAddress: client.RemoteAddr(),
+			TriedBackends: tried,
+		})
+		if err != nil {
+			break
+		}
+		// Per-attempt dial timeout.
+		dialCtx, dialCancel := context.WithTimeout(budgetCtx, p.dialCfg.Timeout)
+		conn, dialErr := p.dialer.DialContext(dialCtx, "tcp", backend.Address())
+		dialCancel()
+		tried[idx] = true
+
+		if dialErr != nil {
+			if !isConnectPhaseFailure(dialErr) {
+				// Non-connect-phase failure: record but don't retry.
+				p.counters[idx].failed.Add(1)
+				p.ejection.RecordFailure(idx, dialErr)
+				p.logDialFailure(backend, dialErr)
+				break
+			}
+			p.counters[idx].failed.Add(1)
+			p.ejection.RecordFailure(idx, dialErr)
+			p.logDialFailure(backend, dialErr)
+			continue
+		}
+
+		server, ok := conn.(*net.TCPConn)
+		if !ok {
+			_ = conn.Close()
+			p.counters[idx].failed.Add(1)
+			p.ejection.RecordFailure(idx, fmt.Errorf("dial returned non-TCP conn"))
+			continue
+		}
+		// Success: record and proceed to proxy. No retry after this point.
+		p.ejection.RecordSuccess(idx)
+		p.proxyConnection(ctx, client, server, idx, startTime)
 		return
 	}
-	server, ok := conn.(*net.TCPConn)
-	if !ok {
-		_ = conn.Close()
-		return
-	}
+	// All attempts exhausted: client connection is closed by the deferred
+	// client.Close().
+}
+
+// proxyConnection does the actual bidirectional copy between client and
+// backend. It is called after a successful dial. Bytes are never retried after
+// this point.
+func (p *Proxy) proxyConnection(ctx context.Context, client, server *net.TCPConn, index int, startTime time.Time) {
 	p.track(server, true)
 	defer p.track(server, false)
 	defer func() { _ = server.Close() }()
@@ -230,15 +348,13 @@ func (p *Proxy) handle(ctx context.Context, client *net.TCPConn) {
 	p.total.Add(1)
 	p.active.Add(1)
 	defer p.active.Add(-1)
-	if index >= 0 {
-		p.counters[index].total.Add(1)
-		p.counters[index].active.Add(1)
-		defer p.counters[index].active.Add(-1)
-	}
+	p.counters[index].total.Add(1)
+	p.counters[index].active.Add(1)
+	defer p.counters[index].active.Add(-1)
 	p.logger.Debug("connection accepted",
 		"service", p.service.Name,
 		"client", client.RemoteAddr().String(),
-		"backend", backend.Address(),
+		"backend", server.RemoteAddr().String(),
 	)
 
 	var copies sync.WaitGroup
@@ -262,7 +378,7 @@ func (p *Proxy) handle(ctx context.Context, client *net.TCPConn) {
 	p.logger.Debug("connection closed",
 		"service", p.service.Name,
 		"client", client.RemoteAddr().String(),
-		"backend", backend.Address(),
+		"backend", server.RemoteAddr().String(),
 		"duration_ms", time.Since(startTime).Milliseconds(),
 		"bytes_in", clientBytes,
 		"bytes_out", backendBytes,
@@ -295,9 +411,6 @@ func (p *Proxy) configureIdleDetection(conn *net.TCPConn) {
 	if interval < time.Second {
 		interval = time.Second
 	}
-	// Per-read idle deadline refresh requires wrapping or chunking io.Copy and
-	// disables Linux splice. Keep plain TCPConn copies and use the configured
-	// idle period for TCP keepalive dead-peer detection instead.
 	_ = conn.SetKeepAliveConfig(net.KeepAliveConfig{Enable: true, Idle: p.idleTimeout, Interval: interval, Count: 3})
 }
 
@@ -333,15 +446,6 @@ func (p *Proxy) closeConnections() {
 	}
 }
 
-func (p *Proxy) backendIndex(want state.Backend) int {
-	for i, backend := range p.service.Backends {
-		if backend == want {
-			return i
-		}
-	}
-	return -1
-}
-
 func (p *Proxy) Stats() Stats {
 	service := ServiceStats{Name: p.service.Name, ActiveConnections: p.active.Load(), TotalConnections: p.total.Load(), BytesFromClients: p.fromClients.Load(), BytesFromBackends: p.fromBackend.Load()}
 	service.Listeners = make([]ListenerStats, len(p.service.Listeners))
@@ -349,8 +453,33 @@ func (p *Proxy) Stats() Stats {
 		service.Listeners[i] = ListenerStats{Address: listener.Address, Protocol: listener.Protocol, Port: listener.Port, PortRange: listener.PortRange, ActiveConnections: service.ActiveConnections, TotalConnections: service.TotalConnections}
 	}
 	service.Backends = make([]BackendStats, len(p.service.Backends))
+	ejectionStates := p.ejection.States()
 	for i, backend := range p.service.Backends {
-		service.Backends[i] = BackendStats{Host: backend.Host, Port: backend.Port, ActiveConnections: p.counters[i].active.Load(), TotalConnections: p.counters[i].total.Load(), FailedConnections: p.counters[i].failed.Load(), BytesFromClients: p.counters[i].bytesFromClients.Load(), BytesFromBackend: p.counters[i].bytesFromBackend.Load()}
+		bs := BackendStats{
+			Host:              backend.Host,
+			Port:              backend.Port,
+			ActiveConnections: p.counters[i].active.Load(),
+			TotalConnections:  p.counters[i].total.Load(),
+			FailedConnections: p.counters[i].failed.Load(),
+			BytesFromClients:  p.counters[i].bytesFromClients.Load(),
+			BytesFromBackend:  p.counters[i].bytesFromBackend.Load(),
+		}
+		if i < len(ejectionStates) {
+			es := ejectionStates[i]
+			if es.Up {
+				bs.State = "up"
+			} else {
+				bs.State = "ejected"
+				t := es.EjectedUntil
+				bs.EjectedUntil = &t
+			}
+			bs.LastError = es.LastErr
+			if !es.LastFailureAt.IsZero() {
+				t := es.LastFailureAt
+				bs.LastFailureAt = &t
+			}
+		}
+		service.Backends[i] = bs
 	}
 	result := Stats{Services: []ServiceStats{service}}
 	p.mu.Lock()

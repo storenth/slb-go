@@ -16,6 +16,14 @@ const (
 	DefaultDialTimeout  = 5 * time.Second
 	DefaultIdleTimeout  = 5 * time.Minute
 	DefaultPortRangeCap = 256
+
+	// Milestone 1f dial-retry and ejection defaults (docs/01-net-theory.md).
+	DefaultDialTimeoutM1F         = 3 * time.Second
+	DefaultDialMaxAttempts        = 3
+	DefaultDialBudget             = 5 * time.Second
+	DefaultEjectionConsecFailures = 3
+	DefaultEjectionBaseTime       = 30 * time.Second
+	DefaultEjectionMaxTime        = 5 * time.Minute
 )
 
 type Backend struct {
@@ -47,10 +55,62 @@ func (l Listener) ports() (int, int) {
 }
 
 type Service struct {
-	Name      string     `json:"name"`
-	Listeners []Listener `json:"listeners"`
-	Backends  []Backend  `json:"backends"`
-	Affinity  string     `json:"affinity"`
+	Name      string         `json:"name"`
+	Listeners []Listener     `json:"listeners"`
+	Backends  []Backend      `json:"backends"`
+	Affinity  string         `json:"affinity"`
+	Dial      DialConfig     `json:"dial,omitempty"`
+	Ejection  EjectionConfig `json:"ejection,omitempty"`
+}
+
+// DialConfig controls the dial-retry behaviour for a service. All fields are
+// optional; zero values fall back to the defaults in docs/01-net-theory.md.
+type DialConfig struct {
+	Timeout     string `json:"timeout,omitempty"`
+	MaxAttempts int    `json:"max_attempts,omitempty"`
+	Budget      string `json:"budget,omitempty"`
+}
+
+// EjectionConfig controls passive backend ejection for a service. All fields
+// are optional; zero values fall back to the defaults.
+type EjectionConfig struct {
+	ConsecutiveFailures int    `json:"consecutive_failures,omitempty"`
+	BaseTime            string `json:"base_time,omitempty"`
+	MaxTime             string `json:"max_time,omitempty"`
+}
+
+// ResolvedDialConfig is the validated, parsed form of DialConfig.
+type ResolvedDialConfig struct {
+	Timeout     time.Duration
+	MaxAttempts int
+	Budget      time.Duration
+}
+
+// ResolvedEjectionConfig is the validated, parsed form of EjectionConfig.
+type ResolvedEjectionConfig struct {
+	ConsecutiveFailures int
+	BaseTime            time.Duration
+	MaxTime             time.Duration
+}
+
+func (d DialConfig) Resolve() ResolvedDialConfig {
+	timeout := durationOr(d.Timeout, DefaultDialTimeoutM1F)
+	maxAttempts := d.MaxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = DefaultDialMaxAttempts
+	}
+	budget := durationOr(d.Budget, DefaultDialBudget)
+	return ResolvedDialConfig{Timeout: timeout, MaxAttempts: maxAttempts, Budget: budget}
+}
+
+func (e EjectionConfig) Resolve() ResolvedEjectionConfig {
+	consec := e.ConsecutiveFailures
+	if consec <= 0 {
+		consec = DefaultEjectionConsecFailures
+	}
+	baseTime := durationOr(e.BaseTime, DefaultEjectionBaseTime)
+	maxTime := durationOr(e.MaxTime, DefaultEjectionMaxTime)
+	return ResolvedEjectionConfig{ConsecutiveFailures: consec, BaseTime: baseTime, MaxTime: maxTime}
 }
 
 type Timeouts struct {
@@ -169,6 +229,42 @@ func (c Config) Validate() error {
 				errs = append(errs, fmt.Errorf("%s duplicates %q", backendPrefix, address))
 			}
 			seenBackends[address] = struct{}{}
+		}
+		// Validate dial config.
+		if service.Dial.Timeout != "" {
+			if d, err := time.ParseDuration(service.Dial.Timeout); err != nil {
+				errs = append(errs, fmt.Errorf("%s.dial.timeout must be a duration: %w", prefix, err))
+			} else if d <= 0 {
+				errs = append(errs, fmt.Errorf("%s.dial.timeout must be positive", prefix))
+			}
+		}
+		if service.Dial.Budget != "" {
+			if d, err := time.ParseDuration(service.Dial.Budget); err != nil {
+				errs = append(errs, fmt.Errorf("%s.dial.budget must be a duration: %w", prefix, err))
+			} else if d <= 0 {
+				errs = append(errs, fmt.Errorf("%s.dial.budget must be positive", prefix))
+			}
+		}
+		if service.Dial.MaxAttempts < 0 {
+			errs = append(errs, fmt.Errorf("%s.dial.max_attempts must be >= 0 (0 means default)", prefix))
+		}
+		// Validate ejection config.
+		if service.Ejection.BaseTime != "" {
+			if d, err := time.ParseDuration(service.Ejection.BaseTime); err != nil {
+				errs = append(errs, fmt.Errorf("%s.ejection.base_time must be a duration: %w", prefix, err))
+			} else if d <= 0 {
+				errs = append(errs, fmt.Errorf("%s.ejection.base_time must be positive", prefix))
+			}
+		}
+		if service.Ejection.MaxTime != "" {
+			if d, err := time.ParseDuration(service.Ejection.MaxTime); err != nil {
+				errs = append(errs, fmt.Errorf("%s.ejection.max_time must be a duration: %w", prefix, err))
+			} else if d <= 0 {
+				errs = append(errs, fmt.Errorf("%s.ejection.max_time must be positive", prefix))
+			}
+		}
+		if service.Ejection.ConsecutiveFailures < 0 {
+			errs = append(errs, fmt.Errorf("%s.ejection.consecutive_failures must be >= 0 (0 means default)", prefix))
 		}
 	}
 	for name, value := range map[string]string{"timeouts.dial": c.Timeouts.Dial, "timeouts.idle": c.Timeouts.Idle} {

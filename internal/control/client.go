@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/storenth/slb-go/internal/state"
 )
@@ -43,11 +44,15 @@ func (l Listener) AddressPort() string {
 }
 
 type Backend struct {
-	Host              string `json:"host"`
-	Port              int    `json:"port"`
-	ActiveConnections int64  `json:"active_connections"`
-	TotalConnections  uint64 `json:"total_connections"`
-	FailedConnections uint64 `json:"failed_connections"`
+	Host              string     `json:"host"`
+	Port              int        `json:"port"`
+	ActiveConnections int64      `json:"active_connections"`
+	TotalConnections  uint64     `json:"total_connections"`
+	FailedConnections uint64     `json:"failed_connections"`
+	State             string     `json:"state"`
+	EjectedUntil      *time.Time `json:"ejected_until,omitempty"`
+	LastError         string     `json:"last_error,omitempty"`
+	LastFailureAt     *time.Time `json:"last_failure_at,omitempty"`
 }
 
 func GetStatus(ctx context.Context, socketPath string) (Status, error) {

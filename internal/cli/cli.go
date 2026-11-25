@@ -43,7 +43,7 @@ func New(out, errOut io.Writer) *cobra.Command {
 func newRun(errOut io.Writer) *cobra.Command {
 	var configPath, socketPath, logLevel, logFormat string
 	command := &cobra.Command{Use: "run", Short: "Run the load balancer", RunE: func(cmd *cobra.Command, _ []string) error {
-		logger, _, err := logging.New(logging.Options{
+		logger, level, err := logging.New(logging.Options{
 			FlagLevel:  logLevel,
 			FlagFormat: logFormat,
 			EnvLevel:   os.Getenv("SLB_LOG_LEVEL"),
@@ -54,6 +54,14 @@ func newRun(errOut io.Writer) *cobra.Command {
 			return err
 		}
 		slog.SetDefault(logger)
+		format, err := logging.ResolveFormat(logging.Options{
+			FlagFormat: logFormat,
+			EnvFormat:  os.Getenv("SLB_LOG_FORMAT"),
+			ErrOut:     errOut,
+		})
+		if err != nil {
+			return err
+		}
 
 		config, err := (state.FileStateProvider{Path: configPath}).Load(cmd.Context())
 		if err != nil {
@@ -74,18 +82,38 @@ func newRun(errOut io.Writer) *cobra.Command {
 			"control_socket_source", string(source),
 		)
 		for _, service := range config.Services {
+			backendAddrs := make([]string, len(service.Backends))
+			for i, b := range service.Backends {
+				backendAddrs[i] = b.Address()
+			}
 			logger.Info("service loaded",
 				"service", service.Name,
 				"listeners", formatListeners(service.Listeners),
-				"backends", len(service.Backends),
+				"backends", backendAddrs,
 				"affinity", service.Affinity,
+			)
+			dialCfg := service.Dial.Resolve()
+			ejectionCfg := service.Ejection.Resolve()
+			logger.Info("service config",
+				"service", service.Name,
+				"log_level", level.String(),
+				"log_format", string(format),
+				"dial_timeout", dialCfg.Timeout.String(),
+				"dial_max_attempts", dialCfg.MaxAttempts,
+				"dial_budget", dialCfg.Budget.String(),
+				"ejection_consecutive_failures", ejectionCfg.ConsecutiveFailures,
+				"ejection_base_time", ejectionCfg.BaseTime.String(),
+				"ejection_max_time", ejectionCfg.MaxTime.String(),
 			)
 		}
 		ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 		defer stop()
 		collection := proxy.Collection{Started: time.Now()}
 		for _, service := range config.Services {
-			p := proxy.NewWithLogger(service, balancer.NewRoundRobin(service.Backends), config.DialTimeout(), config.IdleTimeout(), logger)
+			dialCfg := service.Dial.Resolve()
+			em := balancer.NewEjectionManager(service.Backends, service.Ejection.Resolve(), time.Now, logger)
+			b := balancer.NewRoundRobinWithEjection(service.Backends, em)
+			p := proxy.NewWithLogger(service, b, dialCfg.Timeout, config.IdleTimeout(), logger)
 			collection.Proxies = append(collection.Proxies, p)
 		}
 		controlServer := control.Server{Path: resolved, Stats: collection, Logger: logger}
@@ -165,7 +193,21 @@ func newStatus(out io.Writer, _ io.Writer) *cobra.Command {
 				}
 			}
 			for _, backend := range service.Backends {
-				_, err = fmt.Fprintf(out, "  Backend:  %s:%d  %d active, %d total, %d failed\n", backend.Host, backend.Port, backend.ActiveConnections, backend.TotalConnections, backend.FailedConnections)
+				state := "up"
+				if backend.State != "" {
+					state = backend.State
+				}
+				line := fmt.Sprintf("  Backend:  %s:%d  %s  %d active, %d total, %d failed", backend.Host, backend.Port, state, backend.ActiveConnections, backend.TotalConnections, backend.FailedConnections)
+				if backend.EjectedUntil != nil {
+					line += fmt.Sprintf(", ejected_until %s", backend.EjectedUntil.Format(time.RFC3339))
+				}
+				if backend.LastError != "" {
+					line += fmt.Sprintf(", last_error %q", backend.LastError)
+				}
+				if backend.LastFailureAt != nil {
+					line += fmt.Sprintf(", last_failure_at %s", backend.LastFailureAt.Format(time.RFC3339))
+				}
+				_, err = fmt.Fprintln(out, line)
 				if err != nil {
 					return err
 				}

@@ -28,3 +28,6 @@ slb conns [--backend X]       # live connections, pins
 - Backend `total`: connection attempts routed to this backend, INCLUDING failed ones. `failed`: attempts that could not connect (a subset of `total`). Established connections = `total` - `failed`.
 - With dial retry (milestone 1f), a client connection that fails on one backend and succeeds on another counts as one failed attempt on the first and one attempt on the second; the listener counts the client connection once.
 - Invariant used in tests: sum of backend `total` >= listener `total`, with equality when no retries happen.
+- Backend `state`: `up` or `ejected`. When `ejected`, `ejected_until` is the RFC 3339 timestamp when the ejection expires.
+- `last_error`: the error string from the most recent dial failure (empty when the backend has never failed).
+- `last_failure_at`: the RFC 3339 timestamp of the most recent dial failure (absent when the backend has never failed).

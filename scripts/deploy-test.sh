@@ -8,7 +8,7 @@ echo "backend B" > /tmp/slb-b/index.html
 cd /tmp/slb-a && openssl s_server -accept 9443 -cert $CERTPATH -key $KEYPATH -WWW
 cd /tmp/slb-b && openssl s_server -accept 9444 -cert $CERTPATH -key $KEYPATH -WWW
 
-for i in 1 2 3 4; do curl -sk https://127.0.0.1:8443/index.html; done 
+for i in {1..10}; do curl -sk https://127.0.0.1:8443/index.html; done
 openssl s_client -connect 127.0.0.1:8443 </dev/null 2>/dev/null | openssl x509 -noout -subject
 ./bin/slb status --socket /tmp/slb-dev.sock
 # stdout: round-robin logic
@@ -20,9 +20,9 @@ openssl s_client -connect 127.0.0.1:8443 </dev/null 2>/dev/null | openssl x509 -
 # Uptime: 1077s
 
 # Service: web  (0 active, 7 total)
-#   Listener: 127.0.0.1/tcp  0 active, 7 total
-#   Backend:  127.0.0.1:9443  0 active, 4 total
-#   Backend:  127.0.0.1:9444  0 active, 3 total
+#   Listener: 127.0.0.1:8443/tcp  0 active, 7 total
+#   Backend:  127.0.0.1:9443  ejected 0 active, 4 total, 0 failed
+#   Backend:  127.0.0.1:9444  up 0 active, 2 total, 1 failed
 
 dd if=/dev/zero of=/tmp/slb-a/big.bin bs=1m count=200
 curl -sk -o /dev/null -w '%{size_download} bytes, %{speed_download} B/s\n' https://127.0.0.1:8443/big.bin

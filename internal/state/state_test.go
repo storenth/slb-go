@@ -134,6 +134,123 @@ func TestConfigValidateRuntimeOK(t *testing.T) {
 	}
 }
 
+func TestConfigValidationDialEjection(t *testing.T) {
+	validService := func() Service {
+		return Service{
+			Name:      "web",
+			Listeners: []Listener{{Address: "127.0.0.1", Protocol: "tcp", Port: 8443}},
+			Backends:  []Backend{{Host: "127.0.0.1", Port: 9443}},
+			Affinity:  "none",
+		}
+	}
+	tests := []struct {
+		name     string
+		config   Config
+		contains string
+	}{
+		{
+			name:     "bad dial timeout",
+			config:   Config{Services: []Service{func() Service { s := validService(); s.Dial.Timeout = "soon"; return s }()}},
+			contains: "dial.timeout must be a duration",
+		},
+		{
+			name:     "negative dial timeout",
+			config:   Config{Services: []Service{func() Service { s := validService(); s.Dial.Timeout = "-1s"; return s }()}},
+			contains: "dial.timeout must be positive",
+		},
+		{
+			name:     "bad dial budget",
+			config:   Config{Services: []Service{func() Service { s := validService(); s.Dial.Budget = "soon"; return s }()}},
+			contains: "dial.budget must be a duration",
+		},
+		{
+			name:     "negative dial budget",
+			config:   Config{Services: []Service{func() Service { s := validService(); s.Dial.Budget = "-1s"; return s }()}},
+			contains: "dial.budget must be positive",
+		},
+		{
+			name:     "negative max attempts",
+			config:   Config{Services: []Service{func() Service { s := validService(); s.Dial.MaxAttempts = -1; return s }()}},
+			contains: "dial.max_attempts must be >= 0",
+		},
+		{
+			name:     "bad ejection base_time",
+			config:   Config{Services: []Service{func() Service { s := validService(); s.Ejection.BaseTime = "soon"; return s }()}},
+			contains: "ejection.base_time must be a duration",
+		},
+		{
+			name:     "negative ejection base_time",
+			config:   Config{Services: []Service{func() Service { s := validService(); s.Ejection.BaseTime = "-1s"; return s }()}},
+			contains: "ejection.base_time must be positive",
+		},
+		{
+			name:     "bad ejection max_time",
+			config:   Config{Services: []Service{func() Service { s := validService(); s.Ejection.MaxTime = "soon"; return s }()}},
+			contains: "ejection.max_time must be a duration",
+		},
+		{
+			name:     "negative ejection max_time",
+			config:   Config{Services: []Service{func() Service { s := validService(); s.Ejection.MaxTime = "-1s"; return s }()}},
+			contains: "ejection.max_time must be positive",
+		},
+		{
+			name:     "negative ejection consecutive_failures",
+			config:   Config{Services: []Service{func() Service { s := validService(); s.Ejection.ConsecutiveFailures = -1; return s }()}},
+			contains: "ejection.consecutive_failures must be >= 0",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := test.config.Validate()
+			if err == nil || !strings.Contains(err.Error(), test.contains) {
+				t.Fatalf("error = %v, want containing %q", err, test.contains)
+			}
+		})
+	}
+}
+
+func TestDialConfigResolveDefaults(t *testing.T) {
+	cfg := DialConfig{}
+	resolved := cfg.Resolve()
+	if resolved.Timeout != DefaultDialTimeoutM1F {
+		t.Fatalf("default timeout = %v, want %v", resolved.Timeout, DefaultDialTimeoutM1F)
+	}
+	if resolved.MaxAttempts != DefaultDialMaxAttempts {
+		t.Fatalf("default max_attempts = %d, want %d", resolved.MaxAttempts, DefaultDialMaxAttempts)
+	}
+	if resolved.Budget != DefaultDialBudget {
+		t.Fatalf("default budget = %v, want %v", resolved.Budget, DefaultDialBudget)
+	}
+}
+
+func TestEjectionConfigResolveDefaults(t *testing.T) {
+	cfg := EjectionConfig{}
+	resolved := cfg.Resolve()
+	if resolved.ConsecutiveFailures != DefaultEjectionConsecFailures {
+		t.Fatalf("default consecutive_failures = %d, want %d", resolved.ConsecutiveFailures, DefaultEjectionConsecFailures)
+	}
+	if resolved.BaseTime != DefaultEjectionBaseTime {
+		t.Fatalf("default base_time = %v, want %v", resolved.BaseTime, DefaultEjectionBaseTime)
+	}
+	if resolved.MaxTime != DefaultEjectionMaxTime {
+		t.Fatalf("default max_time = %v, want %v", resolved.MaxTime, DefaultEjectionMaxTime)
+	}
+}
+
+func TestDialConfigResolveCustom(t *testing.T) {
+	cfg := DialConfig{Timeout: "2s", MaxAttempts: 5, Budget: "10s"}
+	resolved := cfg.Resolve()
+	if resolved.Timeout != 2*time.Second {
+		t.Fatalf("timeout = %v, want 2s", resolved.Timeout)
+	}
+	if resolved.MaxAttempts != 5 {
+		t.Fatalf("max_attempts = %d, want 5", resolved.MaxAttempts)
+	}
+	if resolved.Budget != 10*time.Second {
+		t.Fatalf("budget = %v, want 10s", resolved.Budget)
+	}
+}
+
 func TestFileStateProviderRejectsUnknownField(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	if err := os.WriteFile(path, []byte(`{"services":[{"name":"x","listeners":[{"address":"127.0.0.1","protocol":"tcp","port":1}],"backends":[{"host":"x","port":1}],"affinity":"none"}],"surprise":true}`), 0o600); err != nil {
