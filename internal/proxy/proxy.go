@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -179,7 +180,7 @@ func NewWithLogger(service state.Service, b balancer.Balancer, idleTimeout time.
 		service:      service,
 		address:      address,
 		balancer:     b,
-		dialer:       &tcpDialer{d: net.Dialer{Timeout: dialCfg.Timeout, KeepAlive: idleTimeout}},
+		dialer:       &tcpDialer{d: net.Dialer{Timeout: dialCfg.Timeout}},
 		dialCfg:      dialCfg,
 		idleTimeout:  idleTimeout,
 		logger:       logger,
@@ -201,7 +202,7 @@ func NewWithDialer(service state.Service, b balancer.Balancer, dialer Dialer, di
 		logger = slog.Default()
 	}
 	if dialer == nil {
-		dialer = &tcpDialer{d: net.Dialer{Timeout: dialCfg.Timeout, KeepAlive: idleTimeout}}
+		dialer = &tcpDialer{d: net.Dialer{Timeout: dialCfg.Timeout}}
 	}
 	return &Proxy{
 		service:      service,
@@ -331,6 +332,58 @@ func (p *Proxy) handle(ctx context.Context, client *net.TCPConn) {
 	// client.Close().
 }
 
+// closeReason describes why a proxied connection was closed.
+type closeReason string
+
+const (
+	reasonNone          closeReason = ""
+	reasonIdle          closeReason = "idle"
+	reasonClientClosed  closeReason = "client closed"
+	reasonBackendClosed closeReason = "backend closed"
+	reasonError         closeReason = "error"
+)
+
+// copyWithIdle copies from src to dst, enforcing an idle timeout. If no bytes
+// are read within the idle window (considering activity in the other direction
+// via lastActivity), the copy returns with reasonIdle.
+//
+// When idleTimeout is zero or negative, io.Copy is used instead, preserving
+// splice(2) on Linux. A positive idleTimeout requires per-read deadline
+// refresh, which gives up splice: reads enter user space so the deadline can
+// be reset after each chunk. See docs/02-linux-io.md (Idle timeout vs splice).
+func copyWithIdle(dst, src *net.TCPConn, idleTimeout time.Duration, lastActivity *atomic.Int64, srcClosed, dstClosed closeReason) (int64, closeReason) {
+	if idleTimeout <= 0 {
+		n, _ := io.Copy(dst, src)
+		return n, srcClosed
+	}
+	buf := make([]byte, 32*1024)
+	var total int64
+	for {
+		readStart := time.Now()
+		if err := src.SetReadDeadline(readStart.Add(idleTimeout)); err != nil {
+			return total, reasonError
+		}
+		n, err := src.Read(buf)
+		if n > 0 {
+			total += int64(n)
+			lastActivity.Store(time.Now().UnixNano())
+			if _, werr := dst.Write(buf[:n]); werr != nil {
+				return total, dstClosed
+			}
+		}
+		if err != nil {
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				last := time.Unix(0, lastActivity.Load())
+				if last.After(readStart) {
+					continue
+				}
+				return total, reasonIdle
+			}
+			return total, srcClosed
+		}
+	}
+}
+
 // proxyConnection does the actual bidirectional copy between client and
 // backend. It is called after a successful dial. Bytes are never retried after
 // this point.
@@ -341,8 +394,6 @@ func (p *Proxy) proxyConnection(ctx context.Context, client, server *net.TCPConn
 	if ctx.Err() != nil {
 		return
 	}
-	p.configureIdleDetection(client)
-	p.configureIdleDetection(server)
 	p.total.Add(1)
 	p.active.Add(1)
 	defer p.active.Add(-1)
@@ -355,22 +406,46 @@ func (p *Proxy) proxyConnection(ctx context.Context, client, server *net.TCPConn
 		"backend", server.RemoteAddr().String(),
 	)
 
+	var lastActivity atomic.Int64
+	lastActivity.Store(time.Now().UnixNano())
+
 	var copies sync.WaitGroup
-	var clientBytes, backendBytes uint64
+	var clientBytes, backendBytes int64
+	var firstReason closeReason
+	var reasonMu sync.Mutex
+	setReason := func(r closeReason) {
+		reasonMu.Lock()
+		if firstReason == reasonNone {
+			firstReason = r
+		}
+		reasonMu.Unlock()
+	}
 	copies.Add(2)
 	go func() {
 		defer copies.Done()
-		count, _ := io.Copy(server, client)
-		clientBytes = uint64(count)
-		p.recordClientBytes(index, clientBytes)
-		_ = server.CloseWrite()
+		n, reason := copyWithIdle(server, client, p.idleTimeout, &lastActivity, reasonClientClosed, reasonBackendClosed)
+		clientBytes = n
+		p.recordClientBytes(index, uint64(n))
+		if reason == reasonIdle {
+			_ = client.Close()
+			_ = server.Close()
+		} else {
+			_ = server.CloseWrite()
+		}
+		setReason(reason)
 	}()
 	go func() {
 		defer copies.Done()
-		count, _ := io.Copy(client, server)
-		backendBytes = uint64(count)
-		p.recordBackendBytes(index, backendBytes)
-		_ = client.CloseWrite()
+		n, reason := copyWithIdle(client, server, p.idleTimeout, &lastActivity, reasonBackendClosed, reasonClientClosed)
+		backendBytes = n
+		p.recordBackendBytes(index, uint64(n))
+		if reason == reasonIdle {
+			_ = client.Close()
+			_ = server.Close()
+		} else {
+			_ = client.CloseWrite()
+		}
+		setReason(reason)
 	}()
 	copies.Wait()
 	p.logger.Debug("connection closed",
@@ -380,6 +455,7 @@ func (p *Proxy) proxyConnection(ctx context.Context, client, server *net.TCPConn
 		"duration_ms", time.Since(startTime).Milliseconds(),
 		"bytes_in", clientBytes,
 		"bytes_out", backendBytes,
+		"close_reason", firstReason,
 	)
 }
 
@@ -399,17 +475,6 @@ func (p *Proxy) logDialFailure(backend state.Backend, err error) {
 		attrs = append(attrs, "suppressed", suppressed)
 	}
 	p.logger.Warn("backend dial failed", attrs...)
-}
-
-func (p *Proxy) configureIdleDetection(conn *net.TCPConn) {
-	if p.idleTimeout <= 0 {
-		return
-	}
-	interval := p.idleTimeout / 3
-	if interval < time.Second {
-		interval = time.Second
-	}
-	_ = conn.SetKeepAliveConfig(net.KeepAliveConfig{Enable: true, Idle: p.idleTimeout, Interval: interval, Count: 3})
 }
 
 func (p *Proxy) recordClientBytes(index int, count uint64) {

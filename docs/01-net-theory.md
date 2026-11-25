@@ -24,6 +24,7 @@ Short invariants for agents and humans. Each rule has a source. Verify against t
 ## Load balancing
 - **Round-robin** ignores load. **Least-connections** suits long-lived connections. **Power of two choices** (pick two at random, take the less loaded) is near-optimal and cheap. Source: Mitzenmacher.
 - **Source-IP hash** skews badly behind NAT/CGNAT (many users share one IP).
+- **Our mapping (milestone 4):** `affinity: none` uses round-robin, least-connections or power of two choices; `client_ip` and `client_ip+sni` use weighted rendezvous hashing. Details: `docs/06-config-and-affinity.md`.
 - **Consistent hashing** (rendezvous or Maglev) remaps few clients when a backend is added or removed. **Maglev table size must be prime** and much larger than the backend count. Source: Maglev paper.
 - **Determinism rule:** the hash input and function must be identical on both HA nodes, with no per-process random seeds (Go's `hash/maphash` seeds are random per process, and Go map iteration order is randomized: use a fixed hash such as FNV or xxhash, and sort keys before iterating).
 - Removing an unhealthy backend must not reshuffle healthy backends' clients under consistent hashing.

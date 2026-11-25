@@ -262,3 +262,126 @@ func TestFileStateProviderRejectsUnknownField(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 }
+
+func TestTimeoutsDialMovedKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	data := `{"services":[{"name":"x","listeners":[{"address":"127.0.0.1","protocol":"tcp","port":1}],"backends":[{"host":"x","port":1}],"affinity":"none"}],"timeouts":{"dial":"5s","idle":"5m"}}`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := (FileStateProvider{Path: path}).Load(context.Background())
+	if err == nil {
+		t.Fatal("expected error for removed timeouts.dial")
+	}
+	if !strings.Contains(err.Error(), "timeouts.dial was removed") {
+		t.Fatalf("error = %v, want containing %q", err, "timeouts.dial was removed")
+	}
+	if !strings.Contains(err.Error(), "services[].dial.timeout") {
+		t.Fatalf("error = %v, want containing %q", err, "services[].dial.timeout")
+	}
+}
+
+func TestTimeoutsUnknownKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	data := `{"services":[{"name":"x","listeners":[{"address":"127.0.0.1","protocol":"tcp","port":1}],"backends":[{"host":"x","port":1}],"affinity":"none"}],"timeouts":{"idle":"5m","bogus":"1s"}}`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := (FileStateProvider{Path: path}).Load(context.Background())
+	if err == nil {
+		t.Fatal("expected error for unknown timeouts.bogus")
+	}
+	if !strings.Contains(err.Error(), "timeouts.bogus") {
+		t.Fatalf("error = %v, want containing %q", err, "timeouts.bogus")
+	}
+}
+
+func TestIdlePrecedence(t *testing.T) {
+	tests := []struct {
+		name     string
+		service  Service
+		global   string
+		expected time.Duration
+	}{
+		{
+			name:     "service beats global beats built-in",
+			service:  Service{Idle: "1h"},
+			global:   "5m",
+			expected: time.Hour,
+		},
+		{
+			name:     "global beats built-in",
+			service:  Service{},
+			global:   "10m",
+			expected: 10 * time.Minute,
+		},
+		{
+			name:     "built-in default",
+			service:  Service{},
+			global:   "",
+			expected: DefaultIdleTimeout,
+		},
+		{
+			name:     "empty service idle falls through to global",
+			service:  Service{Idle: ""},
+			global:   "30m",
+			expected: 30 * time.Minute,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			globalDefault := durationOr(test.global, DefaultIdleTimeout)
+			got := test.service.ResolveIdle(globalDefault)
+			if got != test.expected {
+				t.Fatalf("ResolveIdle = %v, want %v", got, test.expected)
+			}
+		})
+	}
+}
+
+func TestServiceIdleValidation(t *testing.T) {
+	validService := func() Service {
+		return Service{
+			Name:      "web",
+			Listeners: []Listener{{Address: "127.0.0.1", Protocol: "tcp", Port: 8443}},
+			Backends:  []Backend{{Host: "127.0.0.1", Port: 9443}},
+			Affinity:  "none",
+		}
+	}
+	tests := []struct {
+		name     string
+		service  Service
+		contains string
+	}{
+		{"bad idle duration", func() Service { s := validService(); s.Idle = "soon"; return s }(), "idle must be a duration"},
+		{"negative idle", func() Service { s := validService(); s.Idle = "-1s"; return s }(), "idle must be positive"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := Config{Services: []Service{test.service}}.Validate()
+			if err == nil || !strings.Contains(err.Error(), test.contains) {
+				t.Fatalf("error = %v, want containing %q", err, test.contains)
+			}
+		})
+	}
+}
+
+func TestFileStateProviderIdleOverride(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	data := `{"services":[{"name":"web","listeners":[{"address":"127.0.0.1","protocol":"tcp","port":8443}],"backends":[{"host":"127.0.0.1","port":9443}],"affinity":"none","idle":"1h"}],"timeouts":{"idle":"5m"}}`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config, err := (FileStateProvider{Path: path}).Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	globalIdle := config.IdleTimeout()
+	effective := config.Services[0].ResolveIdle(globalIdle)
+	if effective != time.Hour {
+		t.Fatalf("effective idle = %v, want 1h (per-service override should win over global 5m)", effective)
+	}
+	if globalIdle != 5*time.Minute {
+		t.Fatalf("global idle = %v, want 5m", globalIdle)
+	}
+}

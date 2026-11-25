@@ -60,6 +60,7 @@ type Service struct {
 	Affinity  string         `json:"affinity"`
 	Dial      DialConfig     `json:"dial,omitempty"`
 	Ejection  EjectionConfig `json:"ejection,omitempty"`
+	Idle      string         `json:"idle,omitempty"`
 }
 
 // DialConfig controls the dial-retry behaviour for a service. All fields are
@@ -112,10 +113,48 @@ func (e EjectionConfig) Resolve() ResolvedEjectionConfig {
 	return ResolvedEjectionConfig{ConsecutiveFailures: consec, BaseTime: baseTime, MaxTime: maxTime}
 }
 
+// ResolveIdle returns the effective idle timeout for this service, using
+// per-service override, then global default, then built-in default.
+func (s Service) ResolveIdle(globalDefault time.Duration) time.Duration {
+	return durationOr(s.Idle, globalDefault)
+}
+
 // Timeouts holds global timeout settings. Dial timeout is per-service
 // (see Service.Dial); only idle is global.
 type Timeouts struct {
 	Idle string `json:"idle"`
+}
+
+// ErrTimeoutsDialRemoved is returned when the config contains the removed
+// "timeouts.dial" key. It tells the user where the setting moved.
+var ErrTimeoutsDialRemoved = errors.New(`timeouts.dial was removed; use services[].dial.timeout`)
+
+// UnmarshalJSON decodes Timeouts with strict field checking. The removed
+// "dial" key produces a moved-key message; any other unknown key names the
+// key and its path.
+func (t *Timeouts) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	known := map[string]bool{"idle": true}
+	for key := range raw {
+		if key == "dial" {
+			return ErrTimeoutsDialRemoved
+		}
+		if !known[key] {
+			return fmt.Errorf("timeouts.%s: unknown field", key)
+		}
+	}
+	// Decode only the known fields (idle). We re-decode into a struct to
+	// get proper type checking on the value.
+	type alias Timeouts
+	var a alias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	*t = Timeouts(a)
+	return nil
 }
 
 // Control holds control-plane settings. Socket is optional: when empty the
@@ -264,6 +303,14 @@ func (c Config) Validate() error {
 		}
 		if service.Ejection.ConsecutiveFailures < 0 {
 			errs = append(errs, fmt.Errorf("%s.ejection.consecutive_failures must be >= 0 (0 means default)", prefix))
+		}
+		// Validate per-service idle override.
+		if service.Idle != "" {
+			if d, err := time.ParseDuration(service.Idle); err != nil {
+				errs = append(errs, fmt.Errorf("%s.idle must be a duration: %w", prefix, err))
+			} else if d <= 0 {
+				errs = append(errs, fmt.Errorf("%s.idle must be positive", prefix))
+			}
 		}
 	}
 	for name, value := range map[string]string{"timeouts.idle": c.Timeouts.Idle} {

@@ -12,7 +12,7 @@
 Go binary + `keepalived` + the Linux kernel. Nothing else. HAProxy, Envoy, IPVS and Consul are NOT used in the MVP (benchmark or future options only).
 
 ## Docs index (read before related work)
-`docs/00-architecture.md` topology, service model, decisions | `docs/01-net-theory.md` TCP/TLS/VRRP/related flows | `docs/02-linux-io.md` Go net, kernel, systemd | `docs/03-product-scope.md` positioning, protocol checklist | `docs/04-cli-and-ui.md` CLI contract, UI rules | `docs/05-performance.md` sizing, terms, speed-up rules | `docs/references.md` sources | `PLANS.md` milestones (prompts are in `prompts/`)
+`docs/00-architecture.md` topology, service model, decisions | `docs/01-net-theory.md` TCP/TLS/VRRP/related flows | `docs/02-linux-io.md` Go net, kernel, systemd | `docs/03-product-scope.md` positioning, protocol checklist | `docs/04-cli-and-ui.md` CLI contract, UI rules | `docs/05-performance.md` sizing, terms, speed-up rules | `docs/06-config-and-affinity.md` config reference, affinity examples | `docs/references.md` sources | `PLANS.md` milestones (prompts are in `prompts/`)
 
 ## Layout
 `cmd/slb/` | `internal/{proxy,balancer,state,control,health,ha,cli,ui}` | `scripts/` | `config/` | `docs/` | `prompts/`
@@ -26,7 +26,7 @@ Go binary + `keepalived` + the Linux kernel. Nothing else. HAProxy, Envoy, IPVS 
 2. `golangci-lint run` (if not installed, say so)
 3. `go test -race ./...`
 
-New balancer, CLI command, UI action, or health check ships with tests. Integration tests use dummy TLS/UDP backends on localhost (no root, no real VIP). Bug fixes start with a failing test.
+In your final report list each command above with its result (pass, fail or skipped, and why). New balancer, CLI command, UI action, or health check ships with tests. Integration tests use dummy TLS/UDP backends on localhost (no root, no real VIP). Bug fixes start with a failing test.
 
 ## Code rules
 - Platform: deploy on Linux (Debian 12+). macOS is dev-and-tests only. Linux-specific code (syscalls, socket options, sysctl) goes behind `//go:build linux` with a portable fallback; `go build ./...` and `go test ./...` must keep working on macOS. Linux results are what count.
@@ -43,6 +43,7 @@ New balancer, CLI command, UI action, or health check ships with tests. Integrat
 - Mandatory configurable timeouts: dial, ClientHello peek, idle (document the idle-vs-splice choice).
 - **Service model:** service = listeners (protocol + port or bounded range) + one backend pool + one affinity policy (`none`, `client_ip`, `client_ip+sni`). Affinity scope is the service, never one listener.
 - **Selection order:** (1) local pin for this client IP (also for draining backends), (2) deterministic hash (fixed hash function, no per-process seeds, sorted iteration). Pins are per-node and never required for correctness after failover.
+- `algorithm` (`round_robin`|`least_conn`|`p2c`) is valid only with affinity `none`; `client_ip` and `client_ip+sni` use weighted rendezvous hashing. Timers: `dial.*` and `ejection.*` per service; `idle` global default with per-service override (docs/06).
 - `drain` waits up to a configured maximum, then closes. Never rebalance existing connections.
 - Dial failure: retry on a DIFFERENT eligible backend (max 3 attempts, 5 s total budget, connect-phase failures only, never after bytes were forwarded; replay peeked ClientHello bytes). Eject after 3 consecutive failures; never eject the last backend (fail-open). Defaults and rationale: `docs/01-net-theory.md`.
 - Backend probes run on BOTH nodes with hysteresis; `slb health` is separate (local, <1s, exit 0/1).

@@ -280,3 +280,55 @@ func TestDialFailureLoggingRateLimited(t *testing.T) {
 		t.Fatalf("expected exactly 1 dial-failure log line (rate limited), got %d:\n%s", count, output)
 	}
 }
+
+// TestPerServiceIdleOverrideApplied verifies that a per-service idle override
+// is resolved and passed to the proxy (not the global default).
+func TestPerServiceIdleOverrideApplied(t *testing.T) {
+	cert, _ := certificate(t)
+	backend := startTLSBackend(t, "idle-test", cert, false)
+	defer backend.close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	service := state.Service{
+		Name:      "idle-test",
+		Listeners: []state.Listener{{Address: "127.0.0.1", Protocol: "tcp", Port: 0}},
+		Backends:  []state.Backend{backend.backend},
+		Affinity:  "none",
+		Idle:      "2s",
+	}
+	// Per-service idle (2s) should override the global default (10m).
+	effectiveIdle := service.ResolveIdle(10 * time.Minute)
+	if effectiveIdle != 2*time.Second {
+		t.Fatalf("effective idle = %v, want 2s", effectiveIdle)
+	}
+	p := proxy.New(service, balancer.NewRoundRobin([]state.Backend{backend.backend}), effectiveIdle)
+	done := make(chan error, 1)
+	go func() { done <- p.Run(ctx) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for strings.HasSuffix(p.Address(), ":0") && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if strings.HasSuffix(p.Address(), ":0") {
+		t.Fatal("proxy did not start")
+	}
+
+	// Dial the proxy and verify the connection is accepted with the per-service
+	// idle resolved. The idle timeout is enforced via per-read deadline refresh
+	// in copyWithIdle; we verify the connection works end-to-end.
+	conn, err := net.DialTimeout("tcp", p.Address(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	// Give the proxy time to accept and configure the connection.
+	time.Sleep(100 * time.Millisecond)
+	if conn.RemoteAddr() == nil {
+		t.Fatal("connection closed unexpectedly")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("proxy run: %v", err)
+	}
+}

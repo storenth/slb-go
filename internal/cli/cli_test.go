@@ -383,6 +383,10 @@ func TestStartupLogContainsSocketPathAndSource(t *testing.T) {
 	if !strings.Contains(output, `"flag"`) {
 		t.Fatalf("startup log does not show source as flag:\n%s", output)
 	}
+	// The "service loaded" line should include the effective idle timeout.
+	if !strings.Contains(output, "idle_timeout") {
+		t.Fatalf("startup log does not contain idle_timeout:\n%s", output)
+	}
 }
 
 func TestStatusDaemonDownExitCodeAndMessage(t *testing.T) {

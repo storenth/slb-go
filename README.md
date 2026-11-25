@@ -56,12 +56,20 @@ Illustrative shape (the authoritative example is `config/dev.json`):
       "backends": [{ "host": "127.0.0.1", "port": 9443 }],
       "affinity": "none",
       "dial": {"timeout": "3s", "max_attempts": 3, "budget": "5s"},
-      "ejection": {"consecutive_failures": 3, "base_time": "30s", "max_time": "5m"}
+      "ejection": {"consecutive_failures": 3, "base_time": "30s", "max_time": "5m"},
+      "idle": "1h"
     }
   ],
-  // is how long an established connection can carry no bytes in either direction before the SLB closes it. It frees sockets and drops dead peers. It's about one connection, and 5 minutes is the default.
-  // An FTP trap you should know about: during a long data transfer, the FTP control connection carries no bytes. If the transfer lasts longer than idle, the SLB closes the control connection and the transfer fails. FTP therefore needs a longer per-service idle, such as "idle": "1h". The same applies to SSH sessions, database pools, and WebSockets with sparse traffic. So idle needs a per-service override, not only a global value.
-  "timeouts": {"idle": "5m"}  // Closes an established connection with no traffic for this long.
+  // "idle" closes an established connection that carried no bytes in either
+  // direction for this long. It frees sockets and drops dead peers. Default 5m.
+  // Per-service "idle" overrides the global "timeouts.idle"; precedence:
+  // service -> global -> built-in (5m).
+  // FTP trap: during a long data transfer, the FTP control connection carries
+  // no bytes. If the transfer lasts longer than idle, the SLB closes the
+  // control connection and the transfer fails. FTP therefore needs a longer
+  // per-service idle, such as "idle": "1h". The same applies to SSH sessions,
+  // database pools, and WebSockets with sparse traffic.
+  "timeouts": {"idle": "5m"}
 }
 ```
 

@@ -81,16 +81,19 @@ func newRun(errOut io.Writer) *cobra.Command {
 			"control_socket", resolved,
 			"control_socket_source", string(source),
 		)
+		globalIdle := config.IdleTimeout()
 		for _, service := range config.Services {
 			backendAddrs := make([]string, len(service.Backends))
 			for i, b := range service.Backends {
 				backendAddrs[i] = b.Address()
 			}
+			effectiveIdle := service.ResolveIdle(globalIdle)
 			logger.Info("service loaded",
 				"service", service.Name,
 				"listeners", formatListeners(service.Listeners),
 				"backends", backendAddrs,
 				"affinity", service.Affinity,
+				"idle_timeout", effectiveIdle.String(),
 			)
 			dialCfg := service.Dial.Resolve()
 			ejectionCfg := service.Ejection.Resolve()
@@ -112,7 +115,7 @@ func newRun(errOut io.Writer) *cobra.Command {
 		for _, service := range config.Services {
 			em := balancer.NewEjectionManager(service.Backends, service.Ejection.Resolve(), time.Now, logger)
 			b := balancer.NewRoundRobinWithEjection(service.Backends, em)
-			p := proxy.NewWithLogger(service, b, config.IdleTimeout(), logger)
+			p := proxy.NewWithLogger(service, b, service.ResolveIdle(globalIdle), logger)
 			collection.Proxies = append(collection.Proxies, p)
 		}
 		controlServer := control.Server{Path: resolved, Stats: collection, Logger: logger}
