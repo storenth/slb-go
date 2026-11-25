@@ -78,6 +78,25 @@ Round-robin unit tests:
 go test -race -v ./internal/balancer
 ```
 
+Idle timeout enforcement (milestone 1h):
+
+```bash
+go test -race -v ./internal/proxy \
+  -run TestIdleEnforcement
+```
+
+Five behavioural tests with a 200 ms idle timeout: an idle connection is
+closed within ~2× the idle; an active connection survives past idle; activity
+in either direction resets the timer; after an idle close both the client and
+backend connections are closed with no goroutine leaks.
+
+Ejection unit tests (passive ejection, streak multiplier, fail-open):
+
+```bash
+go test -race -v ./internal/balancer \
+  -run TestEjection
+```
+
 ## Manual smoke test
 
 ### 1. Generate a temporary backend certificate
@@ -171,7 +190,51 @@ For these four new connections, the total connection count should increase by
 two for each backend. Earlier certificate or status checks may already have
 increased the displayed totals.
 
-### 7. Stop the processes
+### 7. Verify idle timeout enforcement
+
+With `"idle": "1s"` in `config/dev.json` (per-service or global), start SLB
+and one backend. A connection that sends one byte (to establish the pipe)
+and then goes silent should be closed by SLB after about 1 s:
+
+```bash
+python3 - <<'PY'
+import socket, time
+s = socket.create_connection(("127.0.0.1", 8443))
+s.send(b"x")                      # establish the pipe
+time.sleep(0.1)                   # wait for echo
+t = time.time()
+s.settimeout(5)
+try:
+    data = s.recv(1)
+    print("closed by SLB after %.1fs (recv returned %r)" % (time.time() - t, data))
+except socket.timeout:
+    print("NOT closed after 5s: idle is not enforced")
+PY
+```
+
+Expected: "closed by SLB after ~1.0s". With `--log-level debug` the daemon
+logs `connection closed` with `close_reason` `idle` and the duration.
+
+### 8. Verify passive ejection
+
+With one backend down (e.g. stop the 9444 backend), make several connections
+until the dead backend accumulates 3 consecutive failures:
+
+```bash
+for n in 1 2 3 4 5; do
+  echo "test" | nc -w 1 127.0.0.1 8443 || true
+done
+
+./bin/slb status --socket /tmp/slb.sock
+```
+
+Expected: the dead backend shows `ejected` with `ejected_until` about 30 s in
+the future. After 30 s it returns to `up` (time-based re-admission; active
+probes that decide re-admission are milestone 3). If it fails 3 more times it
+is ejected again for 60 s (streak multiplier), then 90 s, and so on up to the
+5 m cap.
+
+### 9. Stop the processes
 
 Press `Ctrl-C` in the SLB terminal and both OpenSSL backend terminals. SLB
 should exit promptly and remove `/tmp/slb.sock`.
@@ -185,6 +248,11 @@ should exit promptly and remove `/tmp/slb.sock`.
 - The client receives the backend certificate through SLB.
 - Connections alternate between the configured backends.
 - A client half-close still receives the complete backend response.
+- An idle connection is closed by the proxy within ~2× the configured idle
+  timeout; an active connection is not; activity in either direction resets
+  the timer; the close reason is logged at debug level.
+- A dead backend is ejected after 3 consecutive failures for 30 s (then 60 s,
+  90 s, ... up to 5 m); the last healthy backend is never ejected.
 - Human-readable and JSON status output are valid.
 - Shutdown leaves no proxy goroutines running.
 - No TLS termination, Consul, keepalived, UDP, or later-milestone behavior is
