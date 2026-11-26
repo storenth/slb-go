@@ -58,6 +58,14 @@ Which fits what: `none` works for any stateless TCP or UDP service. Use `client_
 | `pin.ttl` [M4] | service | 5m | how long a client IP to backend mapping is remembered after the client's last flow ended |
 
 `idle` is about one connection; `pin.ttl` is about remembering a client. Idle caution: an FTP control connection carries no bytes while a long data transfer runs, so a transfer longer than `idle` would lose its control connection. Give FTP a longer per-service idle (for example `"idle": "1h"`). The same goes for SSH, database pools and sparse WebSockets, or use TCP keepalive.
+`idle` closes an established connection that carried no bytes in either direction for this long. It frees sockets and drops dead peers. Default 5m.
+Per-service "idle" overrides the global "timeouts.idle"; precedence:
+  - service -> global -> built-in (5m).
+  - FTP trap: during a long data transfer, the FTP control connection carries
+  - no bytes. If the transfer lasts longer than idle, the SLB closes the
+  - control connection and the transfer fails. FTP therefore needs a longer
+  - per-service idle, such as "idle": "1h". The same applies to SSH sessions,
+  - database pools, and WebSockets with sparse traffic.
 
 ## Examples
 **Stateless website** (any backend can answer anything):

@@ -60,15 +60,6 @@ Illustrative shape (the authoritative example is `config/dev.json`):
       "idle": "1h"
     }
   ],
-  // "idle" closes an established connection that carried no bytes in either
-  // direction for this long. It frees sockets and drops dead peers. Default 5m.
-  // Per-service "idle" overrides the global "timeouts.idle"; precedence:
-  // service -> global -> built-in (5m).
-  // FTP trap: during a long data transfer, the FTP control connection carries
-  // no bytes. If the transfer lasts longer than idle, the SLB closes the
-  // control connection and the transfer fails. FTP therefore needs a longer
-  // per-service idle, such as "idle": "1h". The same applies to SSH sessions,
-  // database pools, and WebSockets with sparse traffic.
   "timeouts": {"idle": "5m"}
 }
 ```
